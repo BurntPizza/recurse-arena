@@ -7,9 +7,12 @@ extern crate opengl_graphics;
 extern crate find_folder;
 extern crate ludomath;
 extern crate ezing as ez;
+// extern crate ncollide;
 
 use std::collections::{HashMap, HashSet};
 use std::time;
+use std::mem;
+use std::cmp::Ordering;
 
 use piston::window::*;
 use piston::event_loop::*;
@@ -24,7 +27,6 @@ use graphics::types::{Color, Matrix2d};
 
 use ludomath::vec2d::*;
 use ludomath::rng::Rng;
-
 
 
 const LOGO: &[&str] = &["bbbbbbbbbbbb",
@@ -53,6 +55,8 @@ const RED: Color = [1.0, 0.0, 0.0, 1.0];
 
 const TAU: f64 = 6.2831853;
 
+const PLAYER_RADIUS: f32 = 0.2;
+
 fn main() {
     assert!(LOGO.iter().all(|r| r.len() == LOGO_WIDTH));
     assert_eq!(LOGO.len(), LOGO_HEIGHT);
@@ -75,30 +79,34 @@ fn main() {
     let mut cache = GlyphCache::new(font).unwrap();
 
     let mut gl = GlGraphics::new(opengl);
-    let es = EventSettings::new();
-    let mut events = Events::new(es);
+    let mut events = Events::new(EventSettings::new());
 
-    // state
-    let mut rng = Rng::new_seeded(44642246, 4645753);
-    let mut buttons_down = HashMap::new();
-    let mut listeners: HashMap<Button, Vec<Listener>> = HashMap::new();
+    let player_name = (into_secs(time::SystemTime::now()
+                                     .duration_since(time::UNIX_EPOCH)
+                                     .expect("Sytem time error")) *
+                       1000.0) as u64;
 
-    let mut entities: Vec<Entity> = vec![];
+    let player_name = player_name.to_string();
 
-    let mut state = State {
-        pos: Vector::new(1.0, 1.0),
-        dir: Vector::new(1.0, 0.0),
-        mouse_screen: Vector::new(0.0, 0.0),
+    let mut state = State::new(player_name.clone());
+
+    let player = Player {
+        name: player_name,
+        pos: Vector::new(1.5, 1.5),
+        dir: Vector::default(),
     };
 
-    let side_len: f64 = 1.0;
-    let small_side_len: f64 = side_len * 0.5;
+    state.entities.push(Entity::Player(player));
 
-    // relative to player position
-    let muzzle = |dir: Vector| {
-        let len = small_side_len / 2.0;
-        dir * len as f32
-    };
+    for y in 0..LOGO_HEIGHT {
+        for x in 0..LOGO_WIDTH {
+            let wall = Wall {
+                pos: (x, y),
+                pixel: logo(x, y),
+            };
+            state.entities.push(Entity::Wall(wall));
+        }
+    }
 
     let begin_time = time::Instant::now();
 
@@ -108,99 +116,61 @@ fn main() {
                 gl.draw(a.viewport(), |c, g| {
                     clear(WHITE, g);
 
-                    let elapsed = (into_secs(begin_time.elapsed())).min(1.0) as f32;
+                    let bias = if cfg!(debug_assertions) { 1.0 } else { 0.0 };
+                    let elapsed = (into_secs(begin_time.elapsed()) + bias).min(1.0) as f32;
 
-                    let centered = c.transform
+                    let original = c.transform;
+                    let centered = original
                         .trans(a.width as f64 / 2.0, a.height as f64 / 2.0)
                         .zoom(ez::expo_in(elapsed) as f64 * 300.0);
 
-                    let tracking = centered.trans(f(-state.pos.x), f(-state.pos.y));
+                    let (px, py) = as_f64s(state.player_pos);
 
+                    let tracking = centered.trans(-px, -py);
 
-                    for y in 0..LOGO_HEIGHT {
-                        for x in 0..LOGO_WIDTH {
-                            let color = logo(x, y).color();
-                            let x = x as f64;
-                            let y = y as f64;
+                    let transforms = Transforms {
+                        original,
+                        centered,
+                        tracking,
+                    };
 
-                            let tile = rectangle::centered_square(x, y, side_len / 2.0);
-                            rectangle(color, tile, tracking, g);
-                        }
-                    }
+                    let ctx = RenderContext {
+                        transforms: &transforms,
+                        g,
+                    };
 
-                    for e in &entities {
-                        e.draw(g, tracking);
-                    }
-
-                    let player_box = rectangle::centered_square(0.0, 0.0, small_side_len / 2.0);
-
-                    circle_arc(RED, 0.03, 0.0, TAU, player_box, centered, g);
-
-                    let end_point = muzzle(state.dir);
-                    line(RED,
-                         0.01,
-                         [0.0, 0.0, f(end_point.x), f(end_point.y)],
-                         centered,
-                         g);
+                    state.draw(ctx);
                 });
             }
             Input::Update(a) => {
                 // every tick
 
-                cull_entities(&mut entities);
-
-                let move_amount = |start: time::Instant| {
-                    let t = into_secs(start.elapsed());
-                    let d = a.dt * 2.0;
-                    (d / (t + 1.5) + d) as f32
-                };
-
-                if let Some(&t) = buttons_down.get(&Button::Keyboard(Key::A)) {
-                    state.pos.x -= move_amount(t);
-                }
-                if let Some(&t) = buttons_down.get(&Button::Keyboard(Key::D)) {
-                    state.pos.x += move_amount(t);
-                }
-                if let Some(&t) = buttons_down.get(&Button::Keyboard(Key::W)) {
-                    state.pos.y -= move_amount(t);
-                }
-                if let Some(&t) = buttons_down.get(&Button::Keyboard(Key::S)) {
-                    state.pos.y += move_amount(t);
-                }
-
-                if let Some((width, height)) = window.window.get_inner_size_pixels() {
-                    let center = Vector::new(width as f32, height as f32) / 2.0;
-                    let mouse = state.mouse_screen - center;
-                    state.dir = (mouse - state.pos).normalize();
+                if let Some(wh) = window.window.get_inner_size_pixels() {
+                    state.window_size = wh;
                 } else {
                     println!("window inner size error?");
                 }
 
-                for e in entities.iter_mut() {
-                    e.update();
-                }
+                state.update();
 
-                window.set_title(format!("{}", entities.len()));
+                window.set_title(format!("{}", state.entities.len()));
             }
             Input::Press(button) => {
-                if !buttons_down.contains_key(&button) {
-                    // for listener in listeners.entry(button).or_insert(vec![]) {
-                    //     listener.fire();
-                    // }
-
-                    buttons_down.insert(button, time::Instant::now());
+                if !state.buttons_down.contains_key(&button) {
+                    state.buttons_down.insert(button, time::Instant::now());
 
                     if button == Button::Mouse(MouseButton::Left) {
                         let b = Bullet {
-                            pos: state.pos + muzzle(state.dir),
-                            vel: state.dir * 0.15,
+                            pos: state.player_pos + state.player_dir * PLAYER_RADIUS,
+                            vel: state.player_dir * 0.15,
                         };
-                        entities.push(Entity::Bullet(b));
+
+                        state.entities.push(Entity::Bullet(b));
                     }
                 }
             }
             Input::Release(button) => {
-                buttons_down.remove(&button);
+                state.buttons_down.remove(&button);
             }
             Input::Move(Motion::MouseCursor(x, y)) => {
                 state.mouse_screen = Vector::new(x as f32, y as f32);
@@ -210,43 +180,154 @@ fn main() {
     }
 }
 
-#[derive(Copy, Clone)]
 struct State {
-    pos: Vector,
-    dir: Vector,
+    player_name: String,
+    window_size: (u32, u32),
     mouse_screen: Vector,
+    buttons_down: HashMap<Button, time::Instant>,
+    entities: Vec<Entity>,
+    player_pos: Vector,
+    player_dir: Vector,
+    last_tick: time::Instant,
+}
+
+impl State {
+    fn new(player_name: String) -> Self {
+        State {
+            player_name,
+            window_size: (0, 0),
+            mouse_screen: Vector::default(),
+            buttons_down: HashMap::new(),
+            entities: vec![],
+            player_pos: Vector::default(),
+            player_dir: Vector::default(),
+            last_tick: time::Instant::now(),
+        }
+    }
+
+    fn draw(&mut self, mut ctx: RenderContext) {
+        self.entities
+            .sort_by(|a, b| match (a, b) {
+                         (&Entity::Wall(_), _) => Ordering::Less,
+                         (_, &Entity::Wall(_)) => Ordering::Greater,
+                         (&Entity::Player(_), _) => Ordering::Greater,
+                         (_, &Entity::Player(_)) => Ordering::Less,
+                         _ => Ordering::Equal,
+                     });
+
+        for e in &self.entities {
+            e.draw(self, &mut ctx);
+        }
+    }
+
+    fn update(&mut self) {
+        let dt = into_secs(self.last_tick.elapsed()) as f32;
+        self.last_tick = time::Instant::now();
+
+        let entities = mem::replace(&mut self.entities, vec![]);
+
+        for mut e in entities {
+            e.update(self, dt);
+            if !e.is_dead() {
+                self.entities.push(e);
+            }
+        }
+    }
 }
 
 enum Entity {
     Bullet(Bullet),
+    Player(Player),
+    Wall(Wall),
 }
 
 impl Entity {
-    fn draw(&self, g: &mut GlGraphics, t: Matrix2d) {
-        match *self {
-            Entity::Bullet(ref b) => {
-                let x = f(b.pos.x);
-                let y = f(b.pos.y);
-                let vo = b.vel.normalize() * 0.1;
-                let vx = f(vo.x);
-                let vy = f(vo.y);
+    fn draw(&self, state: &State, ctx: &mut RenderContext) {
+        let RenderContext { transforms, ref mut g } = *ctx;
 
-                line(RED, 0.005, [0.0, 0.0, vx, vy], t.trans(x, y), g);
+        match *self {
+            Entity::Bullet(Bullet { pos, vel, .. }) => {
+                let vo = pos + vel.normalize() * 0.1;
+
+                line(RED, 0.005, as_line(pos, vo), transforms.tracking, *g);
+            }
+            Entity::Player(Player { pos, dir, .. }) => {
+                let (px, py) = as_f64s(pos);
+                let player_box = rectangle::centered_square(px, py, PLAYER_RADIUS as f64);
+                let end_point = pos + dir * PLAYER_RADIUS;
+
+                circle_arc(RED, 0.03, 0.0, TAU, player_box, transforms.tracking, *g);
+                line(RED, 0.01, as_line(pos, end_point), transforms.tracking, *g);
+            }
+            Entity::Wall(Wall {
+                             pos: (x, y),
+                             pixel,
+                         }) => {
+                let color = pixel.color();
+                let tile = rectangle::square(x as f64, y as f64, 1.0);
+                rectangle(color, tile, transforms.tracking, *g);
             }
         }
     }
-    fn update(&mut self) {
+    fn update(&mut self, state: &mut State, dt: f32) {
         match *self {
             Entity::Bullet(ref mut b) => {
                 b.pos += b.vel;
             }
+            Entity::Player(Player {
+                               ref name,
+                               ref mut pos,
+                               ref mut dir,
+                           }) => {
+                if *name == state.player_name {
+                    let move_amount = |start: time::Instant| {
+                        let t = into_secs(start.elapsed()) as f32;
+                        let d = dt * 2.0;
+                        (d / (t + 1.5) + d)
+                    };
+
+                    if let Some(&t) = state.buttons_down.get(&Button::Keyboard(Key::A)) {
+                        pos.x -= move_amount(t);
+                    }
+                    if let Some(&t) = state.buttons_down.get(&Button::Keyboard(Key::D)) {
+                        pos.x += move_amount(t);
+                    }
+                    if let Some(&t) = state.buttons_down.get(&Button::Keyboard(Key::W)) {
+                        pos.y -= move_amount(t);
+                    }
+                    if let Some(&t) = state.buttons_down.get(&Button::Keyboard(Key::S)) {
+                        pos.y += move_amount(t);
+                    }
+
+                    let (width, height) = state.window_size;
+                    let center = Vector::new(width as f32, height as f32) / 2.0;
+                    let mouse = state.mouse_screen - center;
+                    *dir = (mouse - *pos).normalize();
+
+                    state.player_pos = *pos;
+                    state.player_dir = *dir;
+                }
+            }
+            Entity::Wall { .. } => {}
         }
     }
     fn is_dead(&self) -> bool {
         match *self {
             Entity::Bullet(ref b) => b.pos.magnitude() > 20.0,
+            Entity::Wall { .. } => false,
+            Entity::Player { .. } => false, //TODO
         }
     }
+}
+
+struct Player {
+    name: String,
+    pos: Vector,
+    dir: Vector,
+}
+struct Wall {
+    pos: (usize, usize),
+    pixel: Pixel,
 }
 
 struct Bullet {
@@ -254,13 +335,13 @@ struct Bullet {
     vel: Vector,
 }
 
-struct Listener(Box<FnMut()>);
-impl Listener {
-    fn fire(&mut self) {
-        self.0()
-    }
+struct Transforms {
+    original: Matrix2d,
+    centered: Matrix2d,
+    tracking: Matrix2d,
 }
 
+#[derive(Copy, Clone)]
 enum Pixel {
     Black,
     White,
@@ -269,14 +350,19 @@ enum Pixel {
 }
 
 impl Pixel {
-    fn color(self) -> Color {
-        match self {
+    fn color(&self) -> Color {
+        match *self {
             Pixel::Black => BLACK,
             Pixel::White => WHITE,
             Pixel::Green => GREEN,
             Pixel::Grey => color::grey(0.1),
         }
     }
+}
+
+struct RenderContext<'a> {
+    transforms: &'a Transforms,
+    g: &'a mut GlGraphics,
 }
 
 fn logo(x: usize, y: usize) -> Pixel {
@@ -305,6 +391,10 @@ fn f(x: f32) -> f64 {
     x as f64
 }
 
-fn cull_entities(entities: &mut Vec<Entity>) {
-    entities.retain(|e| !e.is_dead());
+fn as_f64s(v: Vector) -> (f64, f64) {
+    (f(v.x), f(v.y))
+}
+
+fn as_line(v1: Vector, v2: Vector) -> [f64; 4] {
+    [f(v1.x), f(v1.y), f(v2.x), f(v2.y)]
 }
