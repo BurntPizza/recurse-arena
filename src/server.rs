@@ -1,3 +1,4 @@
+#![allow(non_snake_case)]
 
 extern crate recurse_arena;
 extern crate bincode as bc;
@@ -12,6 +13,8 @@ use std::sync::mpsc::{channel, Sender};
 use std::net::{TcpListener, TcpStream};
 use std::time::{Instant, Duration};
 
+use ludomath::vec2d::*;
+
 fn main() {
     let port = 8000;
     let socket = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap();
@@ -23,15 +26,20 @@ fn main() {
 
     thread::spawn(|| listen(socket, input_sender, new_client_sender));
 
-    let mut state = State { clients: HashMap::new() };
+    let mut local_state = LocalState {
+        collision_boxes: collision_boxes(),
+        clients: HashMap::new(),
+    };
 
     let mut game_state = GameState {
         players: HashMap::new(),
         bullets: vec![],
+        events: vec![],
     };
 
-    let ups = 10;
+    let ups = 120;
     let desired_delta = Duration::from_millis(1000 / ups);
+    let mut last_tick = Instant::now();
 
     loop {
         let start = Instant::now();
@@ -49,7 +57,7 @@ fn main() {
                     stream,
                 };
 
-                state.clients.insert(player_id, player_state);
+                local_state.clients.insert(player_id, player_state);
 
                 let player = Player {
                     id: player_id,
@@ -72,7 +80,8 @@ fn main() {
 
             let mut to_drop = vec![];
 
-            for (&id, &mut LocalPlayerState { ref mut stream, .. }) in state.clients.iter_mut() {
+            for (&id, &mut LocalPlayerState { ref mut stream, .. }) in
+                local_state.clients.iter_mut() {
                 if let Err(e) = stream.write_all(&data[..]) {
                     println!("Game loop on client {}: ERROR: {}", id.0, e);
                     to_drop.push(id);
@@ -81,7 +90,8 @@ fn main() {
 
             for id in to_drop {
                 println!("Dropping client {}", id.0);
-                state.clients.remove(&id);
+                game_state.players.remove(&id);
+                local_state.clients.remove(&id);
             }
         }
 
@@ -90,32 +100,63 @@ fn main() {
             for (input, id) in input_receiver.try_iter() {
                 match input {
                     Input::Press(b, dir) => {
-                        if let Some(client) = state.clients.get_mut(&id) {
+                        if let Some(client) = local_state.clients.get_mut(&id) {
                             if !client.buttons_down.contains_key(&b) {
-                                game_state.players.get_mut(&id).map(|p| p.dir = dir);
-                                client.buttons_down.insert(b, Instant::now());
+                                if let Some(player) = game_state.players.get_mut(&id) {
+                                    player.dir = dir;
+                                    client.buttons_down.insert(b, Instant::now());
+
+                                    if b == Button::LeftMouse {
+                                        // spawn bullet
+                                        game_state.bullets.push(Bullet::spawn(player));
+                                    }
+                                }
                             }
                         }
                     }
                     Input::Release(b) => {
-                        if let Some(client) = state.clients.get_mut(&id) {
+                        if let Some(client) = local_state.clients.get_mut(&id) {
                             client.buttons_down.remove(&b);
                         }
                     }
                 }
             }
+
+            let move_force = 40.0;
+
+            for (id, lps) in &local_state.clients {
+                if let Some(gs_player) = game_state.players.get_mut(&id) {
+                    gs_player.force = Vector::default();
+
+                    if let Some(_t) = lps.buttons_down.get(&Button::A) {
+                        gs_player.force.x -= move_force;
+                    }
+                    if let Some(_t) = lps.buttons_down.get(&Button::D) {
+                        gs_player.force.x += move_force;
+                    }
+                    if let Some(_t) = lps.buttons_down.get(&Button::W) {
+                        gs_player.force.y -= move_force;
+                    }
+                    if let Some(_t) = lps.buttons_down.get(&Button::S) {
+                        gs_player.force.y += move_force;
+                    }
+                }
+
+            }
         }
 
-        // update state
-        game_state.update();
-
+        // update game state
+        game_state.update(&*local_state.collision_boxes,
+                          last_tick.elapsed().into_secs());
+        last_tick = Instant::now();
 
         let delta = start.elapsed();
         desired_delta.checked_sub(delta).map(|d| thread::sleep(d));
     }
 }
 
-struct State {
+struct LocalState {
+    collision_boxes: Vec<CSquare>,
     clients: HashMap<PlayerId, LocalPlayerState>,
 }
 
