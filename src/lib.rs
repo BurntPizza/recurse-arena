@@ -18,9 +18,9 @@ pub const LOGO: &[&str] = &["bbbbbbbbbbbb",
                             "bwffffffffwb",
                             "bwffffffffwb",
                             "bwwwwwwwwwwb",
-                            "bbbbbffbbbbb",
-                            "wwwwbffbwwww",
-                            "wbbbbffbbbbw",
+                            "bbbbffffbbbb",
+                            "wwwibffbiwww",
+                            "ibbbffffbbbi",
                             "bfbwfwfwbwfb",
                             "bfwfwbwfwffb",
                             "bbbbbbbbbbbb"];
@@ -99,7 +99,7 @@ pub fn collision_boxes() -> Vec<CSquare> {
             let pixel = row.bytes().nth(x).unwrap();
 
             match pixel {
-                b'b' | b'g' => {
+                b'b' | b'g' | b'i' => {
                     let pos = Vector::new(x as f32, y as f32);
                     boxes.push(CSquare::new(pos, 1.0));
                 }
@@ -238,6 +238,8 @@ pub enum Input {
           #[serde(with = "VectorDef")]
           Vector),
     Release(Button),
+    
+    DirChanged(#[serde(with = "VectorDef")] Vector),
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]

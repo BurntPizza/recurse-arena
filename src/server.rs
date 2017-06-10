@@ -114,9 +114,16 @@ fn main() {
                             }
                         }
                     }
+
                     Input::Release(b) => {
                         if let Some(client) = local_state.clients.get_mut(&id) {
                             client.buttons_down.remove(&b);
+                        }
+                    }
+
+                    Input::DirChanged(new_dir) => {
+                        if let Some(player) = game_state.players.get_mut(&id) {
+                            player.dir = new_dir;
                         }
                     }
                 }

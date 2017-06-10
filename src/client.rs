@@ -151,12 +151,10 @@ fn step(e: Input,
                                 events: vec![],
                             },
                             player_id,
-                            player_name: player_name.clone(),
                             window_size: (0, 0),
                             mouse_screen: Vector::default(),
                             buttons_down: HashMap::new(),
                             particles: vec![],
-                            player_pos: Vector::default(),
                             player_dir: Vector::default(),
                             last_tick: time::Instant::now(),
                             rng: Rng::new(),
@@ -200,12 +198,12 @@ fn step(e: Input,
                     gl.draw(a.viewport(), |c, g| {
                         clear(WHITE, g);
 
-                        let elapsed = into_secs(state.begin_time.elapsed()).min(1.0) as f32;
+                        let elapsed = state.begin_time.elapsed().into_secs().min(1.0);
                         let centered = c.transform
                             .trans(a.width as f64 / 2.0, a.height as f64 / 2.0)
                             .zoom(ez::expo_in(elapsed) as f64 * 300.0);
 
-                        let (px, py) = as_f64s(state.game_state.players[&state.player_id].pos);
+                        let (px, py) = as_f64s(state.player_pos());
 
                         let tracking = centered.trans(-px, -py);
 
@@ -268,9 +266,10 @@ fn step(e: Input,
                         state.buttons_down.insert(button, time::Instant::now());
 
                         if let Some(button) = convert_button(button) {
-                            let msg = ra::ToServerMsg::Input(state.player_id,
-                                                             ra::Input::Press(button,
-                                                                              state.player_dir));
+                            let msg =
+                                ra::ToServerMsg::Input(state.player_id,
+                                                       ra::Input::Press(button,
+                                                                        state.player_dir()));
                             send_input(stream, &msg);
                         }
                     }
@@ -291,8 +290,12 @@ fn step(e: Input,
                     let (width, height) = state.window_size;
                     let center = Vector::new(width as f32, height as f32) / 2.0;
                     let mouse = state.mouse_screen - center;
-                    let player_pos = state.game_state.players[&state.player_id].pos;
+                    let player_pos = state.player_pos();
                     state.player_dir = (mouse - player_pos).normalize();
+
+                    let input = ra::Input::DirChanged(state.player_dir);
+                    let msg = ra::ToServerMsg::Input(state.player_id, input);
+                    send_input(stream, &msg);
                 }
                 _ => {}
             }
@@ -345,12 +348,10 @@ fn connect() -> TcpStream {
 struct State {
     game_state: GameState,
     player_id: ra::PlayerId,
-    player_name: String,
     window_size: (u32, u32),
     mouse_screen: Vector,
     buttons_down: HashMap<Button, time::Instant>,
     particles: Vec<Particle>,
-    player_pos: Vector,
     player_dir: Vector,
     last_tick: time::Instant,
     rng: Rng,
@@ -358,11 +359,18 @@ struct State {
 }
 
 impl State {
+    fn player_pos(&self) -> Vector {
+        self.game_state.players[&self.player_id].pos
+    }
+
+    fn player_dir(&self) -> Vector {
+        self.player_dir
+    }
 
     fn draw(&mut self, ctx: &mut RenderContext) {
         for y in 0..LOGO_HEIGHT {
             for x in 0..LOGO_WIDTH {
-                let color = logo(x, y).color();
+                let color = logo(x, y);
                 let r = rectangle::square(x as f64, y as f64, 1.0);
                 rectangle(color, r, ctx.transforms.tracking, ctx.g);
             }
@@ -376,10 +384,24 @@ impl State {
             shape.draw(as_line(vo, pos), &ds, ctx.transforms.tracking, ctx.g);
         }
 
-        for &ra::Player { pos, dir, ref name, .. } in self.game_state.players.values() {
+        for &ra::Player {
+                id,
+                pos,
+                dir,
+                ref name,
+                ..
+            } in self.game_state.players.values() {
+
             let (px, py) = as_f64s(pos);
             let player_box = rectangle::centered_square(px, py, PLAYER_RADIUS as f64);
-            let end_point = pos + self.player_dir * PLAYER_RADIUS;
+
+            let dir = if id == self.player_id {
+                self.player_dir() // use local info
+            } else {
+                dir
+            };
+
+            let end_point = pos + dir * PLAYER_RADIUS;
 
             circle_arc(RED,
                        0.03,
@@ -485,7 +507,7 @@ struct RenderContext<'a, 'b: 'a> {
     cache: &'a mut GlyphCache<'b>,
 }
 
-fn logo(x: usize, y: usize) -> Pixel {
+fn logo(x: usize, y: usize) -> Color {
     assert!(x < LOGO_WIDTH);
     assert!(y < LOGO_HEIGHT);
 
@@ -493,10 +515,10 @@ fn logo(x: usize, y: usize) -> Pixel {
     let pixel = row.bytes().nth(x).unwrap();
 
     match pixel {
-        b'b' => Pixel::Black,
-        b'w' => Pixel::White,
-        b'g' => Pixel::Green,
-        b'f' => Pixel::Grey,
+        b'b' => BLACK,
+        b'w' | b'i' => color::grey(0.9),
+        b'g' => GREEN,
+        b'f' => color::grey(0.1),
         _ => unreachable!(),
     }
 }
