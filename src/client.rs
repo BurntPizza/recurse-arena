@@ -420,7 +420,8 @@ impl State {
                  name,
                  ctx.cache,
                  ctx.transforms
-                     .centered
+                     .tracking
+                     .trans(px, py)
                      .trans(-PLAYER_RADIUS as f64, -PLAYER_RADIUS as f64 * 1.3)
                      .zoom(1.0 / 300.0),
                  ctx.g);

@@ -6,13 +6,15 @@ extern crate ludomath;
 
 use recurse_arena::*;
 
-use std::io::prelude::*;
 use std::thread;
+use std::io::prelude::*;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
 use std::net::{TcpListener, TcpStream};
 use std::time::{Instant, Duration};
 
+use ludomath::rng::Rng;
 use ludomath::vec2d::*;
 
 fn main() {
@@ -27,6 +29,7 @@ fn main() {
     thread::spawn(|| listen(socket, input_sender, new_client_sender));
 
     let mut local_state = LocalState {
+        rng: Rng::new(),
         collision_boxes: collision_boxes(),
         clients: HashMap::new(),
     };
@@ -46,6 +49,7 @@ fn main() {
 
         // send new state to clients
         {
+            // first establish any new clients
             for Client {
                     player_id,
                     player_name,
@@ -59,9 +63,12 @@ fn main() {
 
                 local_state.clients.insert(player_id, player_state);
 
+                let pos = spawn_player(&mut local_state, &game_state);
+
                 let player = Player {
                     id: player_id,
                     name: player_name,
+                    pos,
                     ..Default::default()
                 };
 
@@ -163,6 +170,7 @@ fn main() {
 }
 
 struct LocalState {
+    rng: Rng,
     collision_boxes: Vec<CSquare>,
     clients: HashMap<PlayerId, LocalPlayerState>,
 }
@@ -228,10 +236,7 @@ fn listen(socket: TcpListener,
         };
 
         new_client_sender.send(client.clone()).unwrap();
-
         let input_sender = input_sender.clone();
-
-
         thread::spawn(move || pump_client(client, input_sender));
     }
 }
@@ -270,4 +275,45 @@ fn next_player_id() -> PlayerId {
 
     let id = COUNTER.fetch_add(1, Ordering::SeqCst);
     PlayerId(id as u32)
+}
+
+fn spawn_player(ls: &mut LocalState, gs: &GameState) -> Vector {
+    let mut empty_tiles = vec![];
+
+    for y in 0..LOGO_HEIGHT {
+        for x in 0..LOGO_WIDTH {
+            let row = &LOGO[y];
+            let pixel = row.bytes().nth(x).unwrap();
+
+            match pixel {
+                b'b' | b'g' | b'i' => {}
+                b'w' | b'f' => {
+                    empty_tiles.push(Vector::new(x as f32 + 0.5, y as f32 + 0.5));
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    if gs.players.is_empty() {
+        return empty_tiles[ls.rng.rand_uint(0, empty_tiles.len() as u64) as usize];
+    }
+
+    let idx = empty_tiles
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(i, pos)| {
+                 let shortest = gs.players
+                     .values()
+                     .map(|p| p.pos.dist(pos))
+                     .min_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
+                     .unwrap();
+                 (i, shortest)
+             })
+        .max_by(|&(_, a), &(_, b)| a.partial_cmp(&b).unwrap_or(Ordering::Equal))
+        .map(|(i, _)| i)
+        .unwrap();
+
+    empty_tiles[idx]
 }
