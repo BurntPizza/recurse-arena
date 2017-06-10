@@ -7,24 +7,26 @@ extern crate opengl_graphics;
 extern crate find_folder;
 extern crate ludomath;
 extern crate ezing as ez;
+extern crate bincode as bc;
+extern crate recurse_arena as ra;
 
-use std::collections::{HashMap, HashSet};
+use ra::GameState;
+
+use std::collections::HashMap;
 use std::time;
 use std::mem;
 use std::cmp::Ordering;
 use std::net::TcpStream;
-use std::cell::RefCell;
+
 
 use piston::window::*;
 use piston::event_loop::*;
 use piston::input::*;
-
 use glutin_window::GlutinWindow as Window;
 use opengl_graphics::{GlGraphics, OpenGL};
 use opengl_graphics::glyph_cache::GlyphCache;
 use graphics::*;
 use graphics::types::{Color, Matrix2d};
-
 use ludomath::vec2d::*;
 use ludomath::rng::Rng;
 
@@ -39,9 +41,9 @@ const LOGO: &[&str] = &["bbbbbbbbbbbb",
                         "bwffffffffwb",
                         "bwffffffffwb",
                         "bwwwwwwwwwwb",
-                        "bbbbffffbbbb",
+                        "bbbbbffbbbbb",
                         "wwwwbffbwwww",
-                        "wbbbffffbbbw",
+                        "wbbbbffbbbbw",
                         "bfbwfwfwbwfb",
                         "bfwfwbwfwffb",
                         "bbbbbbbbbbbb"];
@@ -66,6 +68,8 @@ fn main() {
     assert!(LOGO.iter().all(|r| r.len() == LOGO_WIDTH));
     assert_eq!(LOGO.len(), LOGO_HEIGHT);
 
+    let mut stream = connect();
+
     let (full_width, full_height) = glutin::get_primary_monitor().get_dimensions();
 
     let opengl = OpenGL::V3_2;
@@ -88,15 +92,16 @@ fn main() {
     let mut stage = Stage::Menu(menu);
 
     while let Some(e) = events.next(&mut window) {
-        stage = step(e, stage, &mut gl, &mut cache, &mut window);
+        stage = step(e, stage, &mut gl, &mut cache, &mut window, &mut stream);
     }
 }
 
 fn step(e: Input,
-        mut stage: Stage,
+        stage: Stage,
         gl: &mut GlGraphics,
         mut cache: &mut GlyphCache,
-        window: &mut Window)
+        window: &mut Window,
+        mut stream: &mut TcpStream)
         -> Stage {
     match stage {
         Stage::Menu(mut menu) => {
@@ -106,57 +111,81 @@ fn step(e: Input,
                     gl.draw(a.viewport(), |c, g| { clear(WHITE, g); });
                 }
                 Input::Update(_) => {
-                    if cfg!(debug_assertions) {
-                        if menu.buttons_down
-                               .contains_key(&Button::Keyboard(Key::Space)) {
-                            // begin game
+                    if true ||
+                       menu.buttons_down
+                           .contains_key(&Button::Keyboard(Key::Space)) {
+                        // begin game
 
-                            let player_name =
-                                into_secs(time::SystemTime::now()
-                                              .duration_since(time::UNIX_EPOCH)
-                                              .expect("Sytem time error")) as
-                                u64;
+                        let player_name = if cfg!(debug_assertions) {
+                                "Josh"
+                            } else {
+                                unimplemented!()
+                            }
+                            .to_owned();
 
-                            let player_name = player_name.to_string();
 
-                            let mut state = State {
-                                player_id: 0,
-                                player_name: player_name.clone(),
-                                window_size: (0, 0),
-                                mouse_screen: Vector::default(),
-                                buttons_down: HashMap::new(),
-                                entities: vec![],
-                                player_pos: Vector::default(),
-                                player_dir: Vector::default(),
-                                last_tick: time::Instant::now(),
-                                entity_id_counter: 1,
-                                collisions: CollisionMap::new(),
-                                rng: Rng::new(),
-                                begin_time: time::Instant::now(),
-                            };
+                        let player_id = match bc::deserialize_from(&mut stream, bc::Infinite)
+                                  .unwrap() {
+                            ra::FromServerMsg::Welcome(id) => id,
+                            _ => unreachable!(),
+                        };
 
-                            let player = Player {
-                                name: player_name,
-                                pos: Vector::new(1.5, 1.5),
-                                dir: Vector::default(),
-                                vel: Vector::default(),
-                            };
+                        let msg = ra::ToServerMsg::Login(player_id, player_name.clone());
+                        bc::serialize_into(&mut stream, &msg, bc::Infinite).unwrap();
 
-                            state.entities.push(Entity::Player(state.player_id, player));
+                        let mut state = State {
+                            game_state: GameState {
+                                players: vec![],
+                                bullets: vec![],
+                            },
+                            player_id: player_id.0,
+                            player_name: player_name.clone(),
+                            window_size: (0, 0),
+                            mouse_screen: Vector::default(),
+                            buttons_down: HashMap::new(),
+                            background: vec![],
+                            particles: vec![],
+                            entities: vec![],
+                            player_pos: Vector::default(),
+                            player_dir: Vector::default(),
+                            last_tick: time::Instant::now(),
+                            entity_id_counter: 1,
+                            collisions: CollisionMap::new(),
+                            rng: Rng::new(),
+                            begin_time: time::Instant::now(),
+                        };
 
-                            for y in 0..LOGO_HEIGHT {
-                                for x in 0..LOGO_WIDTH {
-                                    let wall = Wall {
-                                        pos: (x, y),
-                                        pixel: logo(x, y),
-                                    };
-                                    let id = state.new_entitiy_id();
-                                    state.entities.push(Entity::Wall(id, wall));
+                        let player = Player {
+                            name: player_name,
+                            dir: Vector::default(),
+                            pos: Vector::new(1.5, 1.5),
+                            vel: Vector::default(),
+                            force: Vector::default(),
+                        };
+
+                        state.entities.push(Entity::Player(state.player_id, player));
+
+                        for y in 0..LOGO_HEIGHT {
+                            for x in 0..LOGO_WIDTH {
+                                let p = logo(x, y);
+                                match p {
+                                    Pixel::Black | Pixel::Green => {
+                                        let wall = Wall {
+                                            pos: (x, y),
+                                            pixel: p,
+                                        };
+                                        let id = state.new_entitiy_id();
+                                        state.entities.push(Entity::Wall(id, wall));
+                                    }
+                                    Pixel::White | Pixel::Grey => {
+                                        let tile = Background::Floor(x as f64, y as f64, p);
+                                        state.background.push(tile);
+                                    }
                                 }
                             }
-
-                            return Stage::Playing(state);
                         }
+
+                        return Stage::Playing(state);
                     }
                 }
                 Input::Press(button) => {
@@ -211,44 +240,81 @@ fn step(e: Input,
                     });
                 }
                 Input::Update(_) => {
-                    // every tick
-
                     if let Some(wh) = window.window.get_inner_size_pixels() {
                         state.window_size = wh;
                     } else {
                         println!("window inner size error?");
                     }
 
-                    state.update();
 
-                    window.set_title(format!("{:?}", state.player_pos));
+
+                    state.update();
                 }
                 Input::Press(button) => {
                     if !state.buttons_down.contains_key(&button) {
                         state.buttons_down.insert(button, time::Instant::now());
 
-                        if button == Button::Mouse(MouseButton::Left) {
-                            let b = Bullet {
-                                pid: state.player_id,
-                                pos: state.player_pos + state.player_dir * PLAYER_RADIUS,
-                                vel: state.player_dir * 0.15,
-                            };
-                            let id = state.new_entitiy_id();
-                            state.entities.push(Entity::Bullet(id, b));
+                        if let Some(button) = convert_button(button) {
+                            let msg = ra::ToServerMsg::Input(ra::PlayerId(state.player_id),
+                                                             ra::Input::Press(button, state.player_dir));
+                            send_input(stream, &msg);
                         }
+
+                        // if button == Button::Mouse(MouseButton::Left) {
+                        //     let b = Bullet {
+                        //         pid: state.player_id,
+                        //         pos: state.player_pos + state.player_dir * PLAYER_RADIUS,
+                        //         vel: state.player_dir * 10.0,
+                        //     };
+                        //     let id = state.new_entitiy_id();
+                        //     state.entities.push(Entity::Bullet(id, b));
+                        // }
                     }
                 }
                 Input::Release(button) => {
+                    if let Some(button) = convert_button(button) {
+                        let msg = ra::ToServerMsg::Input(ra::PlayerId(state.player_id),
+                                                         ra::Input::Release(button));
+                        send_input(stream, &msg);
+                    }
                     state.buttons_down.remove(&button);
                 }
                 Input::Move(Motion::MouseCursor(x, y)) => {
-                    state.mouse_screen = Vector::new(x as f32, y as f32);
+                    let x = x as f32;
+                    let y = y as f32;
+                    state.mouse_screen = Vector::new(x, y);
                 }
                 _ => {}
             }
 
             Stage::Playing(state)
         }
+    }
+}
+
+fn send_input(stream: &mut TcpStream, msg: &ra::ToServerMsg) {
+    if let Err(e) = bc::serialize_into(stream, &msg, bc::Infinite) {
+        println!("Error while sending input: {}", e);
+    }
+}
+
+fn convert_button(b: Button) -> Option<ra::Button> {
+    // give a compile error if I forget a variant below
+    match ra::Button::W {
+        ra::Button::W => {}
+        ra::Button::A => {}
+        ra::Button::S => {}
+        ra::Button::D => {}
+        ra::Button::LeftMouse => {}
+    }
+
+    match b {
+        Button::Keyboard(Key::W) => Some(ra::Button::W),
+        Button::Keyboard(Key::A) => Some(ra::Button::A),
+        Button::Keyboard(Key::S) => Some(ra::Button::S),
+        Button::Keyboard(Key::D) => Some(ra::Button::D),
+        Button::Mouse(MouseButton::Left) => Some(ra::Button::LeftMouse),
+        _ => None,
     }
 }
 
@@ -269,11 +335,14 @@ fn connect() -> TcpStream {
 type CollisionMap = HashMap<u32, Vec<Collision>>;
 
 struct State {
+    game_state: GameState,
     player_id: u32,
     player_name: String,
     window_size: (u32, u32),
     mouse_screen: Vector,
     buttons_down: HashMap<Button, time::Instant>,
+    background: Vec<Background>,
+    particles: Vec<Particle>,
     entities: Vec<Entity>,
     player_pos: Vector,
     player_dir: Vector,
@@ -292,6 +361,10 @@ impl State {
     }
 
     fn draw(&mut self, ctx: &mut RenderContext) {
+        for b in &self.background {
+            b.draw(self, ctx);
+        }
+
         self.entities
             .sort_by(|a, b| match (a, b) {
                          (&Entity::Wall(..), &Entity::Wall(..)) => Ordering::Equal,
@@ -306,31 +379,9 @@ impl State {
             e.draw(self, ctx);
         }
 
-        // if cfg!(debug_assertions) {
-        //     let mut rng = ludomath::rng::Rng::new_seeded(234356, 2638356356);
-
-        //     for e in &self.entities {
-        //         if let Some(ref cs) = self.collisions.get(&e.id()) {
-        //             for c in *cs {
-        //                 let color = [rng.rand_float(0.2, 0.8),
-        //                              rng.rand_float(0.2, 0.8),
-        //                              rng.rand_float(0.2, 0.8),
-        //                              1.0];
-
-        //                 match *e {
-        //                     Entity::Player(_, Player { pos, .. }) => {
-        //                         if let Collision::PlayerWall(wp) = *c {
-        //                             let (wx, wy) = as_f64s(wp);
-        //                             let r = rectangle::square(wx, wy, 1.0);
-        //                             rectangle(color, r, ctx.transforms.tracking, ctx.g);
-        //                         }
-        //                     }
-        //                     _ => {}
-        //                 }
-        //             }
-        //         }
-        //     }
-        // }
+        for p in &self.particles {
+            p.draw(self, ctx);
+        }
     }
 
     fn update(&mut self) {
@@ -366,19 +417,90 @@ impl State {
         }
 
         mem::replace(&mut self.collisions, collisions);
+
+        let particles = mem::replace(&mut self.particles, vec![]);
+
+        for mut p in particles {
+            p.update(self, dt);
+            if !p.is_dead() {
+                self.particles.push(p);
+            }
+        }
+    }
+}
+
+enum Background {
+    Floor(f64, f64, Pixel),
+}
+
+impl Background {
+    fn draw(&self, _state: &State, ctx: &mut RenderContext) {
+        let RenderContext {
+            transforms,
+            ref mut g,
+            ..
+        } = *ctx;
+
+        match *self {
+            Background::Floor(x, y, pixel) => {
+                let r = rectangle::square(x, y, 1.0);
+                rectangle(pixel.color(), r, transforms.tracking, *g);
+            }
+        }
+    }
+}
+
+enum Particle {
+    Spark(Spark),
+}
+
+impl Particle {
+    fn draw(&self, _state: &State, ctx: &mut RenderContext) {
+        let RenderContext {
+            transforms,
+            ref mut g,
+            ..
+        } = *ctx;
+
+        match *self {
+            Particle::Spark(Spark { pos, life, .. }) => {
+                let (x, y) = as_f64s(pos);
+                let shape = ellipse::Ellipse::new([1.0, 1.0 * life, 0.0, life]);
+                let tile = rectangle::centered_square(x, y, (SPARK_RADIUS * 2.0 * life) as f64);
+                let ds = DrawState::default().blend(draw_state::Blend::Add);
+
+                shape.draw(tile, &ds, transforms.tracking, *g);
+            }
+        }
+    }
+
+    fn update(&mut self, _state: &mut State, dt: f32) {
+        match *self {
+            Particle::Spark(ref mut s) => {
+                s.pos += s.vel;
+                s.vel *= s.life.max(0.1);
+                s.vel.rotate_deg_mut(s.spin * s.life);
+                s.life -= dt;
+            }
+        }
+    }
+
+    fn is_dead(&self) -> bool {
+        match *self {
+            Particle::Spark(ref s) => s.life < 0.0,
+        }
     }
 }
 
 #[derive(PartialEq)]
 enum Entity {
-    Spark(u32, Spark),
     Bullet(u32, Bullet),
     Player(u32, Player),
     Wall(u32, Wall),
 }
 
 impl Entity {
-    fn draw(&self, state: &State, ctx: &mut RenderContext) {
+    fn draw(&self, _state: &State, ctx: &mut RenderContext) {
         let RenderContext {
             transforms,
             ref mut g,
@@ -413,78 +535,59 @@ impl Entity {
                 let tile = rectangle::square(x as f64, y as f64, 1.0);
                 rectangle(color, tile, transforms.tracking, *g);
             }
-
-            Entity::Spark(_, Spark { pos, life, .. }) => {
-                let (x, y) = as_f64s(pos);
-                let tile = rectangle::centered_square(x, y, (SPARK_RADIUS * 2.0 * life) as f64);
-                ellipse([1.0, 1.0 * life, 0.0, life], tile, transforms.tracking, *g);
-            }
         }
     }
+
     fn update(&mut self, state: &mut State, collisions: &CollisionMap, dt: f32) {
         match *self {
             Entity::Bullet(id, ref mut b) => {
-
                 if let Some(c) = collisions.get(&id) {
                     if !c.is_empty() {
                         // spawn sparks
                         let n = state.rng.rand_int(5, 10);
                         for _ in 0..n {
+                            let pos = b.pos;
                             let life = state.rng.rand_float(0.5, 1.0);
-                            let id = state.new_entitiy_id();
-                            let vel = -b.vel.rotate_deg(state.rng.rand_float(-30.0, 30.0)) * 0.1;
+                            let vel = -b.vel
+                                           .normalize()
+                                           .rotate_deg(state.rng.rand_float(-30.0, 30.0)) *
+                                      0.06;
                             let spin = state.rng.rand_float(-5.0, 5.0);
                             state
-                                .entities
-                                .push(Entity::Spark(id,
-                                                    Spark {
-                                                        pos: b.pos,
-                                                        vel,
-                                                        life,
-                                                        spin,
-                                                    }));
+                                .particles
+                                .push(Particle::Spark(Spark {
+                                                          pos,
+                                                          vel,
+                                                          life,
+                                                          spin,
+                                                      }));
                         }
 
                         // kill this entity via culling in is_dead
                         b.pos.x = 100.0;
                     }
                 }
-                b.pos += b.vel;
-            }
-
-            Entity::Spark(_, ref mut s) => {
-                s.pos += s.vel;
-                s.vel *= s.life.max(0.1);
-                s.vel.rotate_deg_mut(s.spin);
-                s.life -= dt;
+                b.pos += b.vel * dt;
             }
 
             Entity::Player(id, ref mut player) => {
                 if player.name == state.player_name {
+                    player.force = Vector::new(0.0, 0.0);
                     update_player(player, state, dt);
 
                     if let Some(collisions) = collisions.get(&id) {
                         for c in collisions {
                             if let Collision::PlayerWall(wp) = *c {
-                                let adj = state.rng.rand_float(0.01, 0.05);
-
                                 let wc = wp + Vector::new(0.5, 0.5);
-                                if player.pos.x <= wc.x {
-                                    player.pos.x -= adj;
-                                } else {
-                                    player.pos.x += adj;
-                                }
 
-                                if player.pos.y <= wc.y {
-                                    player.pos.y -= adj;
-                                } else {
-                                    player.pos.y += adj;
-                                }
+                                player.force += (player.pos - wc) * 100.0;
                             }
                         }
                     }
 
-                    player.pos += player.vel;
+                    player.vel += player.force * dt;
+                    player.vel = player.vel.normalize() * player.vel.magnitude().min(40.0) * 0.9;
+                    player.pos += player.vel * dt;
                 }
             }
 
@@ -494,7 +597,6 @@ impl Entity {
     fn is_dead(&self) -> bool {
         match *self {
             Entity::Bullet(_, ref b) => b.pos.magnitude() > 20.0,
-            Entity::Spark(_, ref s) => s.life < 0.0,
             Entity::Wall { .. } => false,
             Entity::Player { .. } => false, //TODO
         }
@@ -502,7 +604,6 @@ impl Entity {
 
     fn id(&self) -> u32 {
         match *self {
-            Entity::Spark(id, ..) => id,
             Entity::Bullet(id, ..) => id,
             Entity::Player(id, ..) => id,
             Entity::Wall(id, ..) => id,
@@ -528,11 +629,8 @@ impl Entity {
         }
 
         match (self, other) {
-            (&Entity::Spark(..), _) |
-            (_, &Entity::Spark(..)) => None,
-
-            (&Entity::Player(id, Player { pos, .. }),
-             &Entity::Wall(wid,
+            (&Entity::Player(_, Player { pos, .. }),
+             &Entity::Wall(_,
                            Wall {
                                pos: (wx, wy),
                                pixel,
@@ -544,12 +642,12 @@ impl Entity {
                 }
             }
 
-            (&Entity::Wall(wid,
+            (&Entity::Wall(_,
                            Wall {
                                pos: (wx, wy),
                                pixel,
                            }),
-             &Entity::Player(id, Player { pos, .. })) => {
+             &Entity::Player(_, Player { pos, .. })) => {
                 if pixel == Pixel::Black || pixel == Pixel::Green {
                     player_wall(wx as f32, wy as f32, pos, false, true)
                 } else {
@@ -614,8 +712,6 @@ enum Collision {
     BulletWall(Vector),
     // player id
     BulletPlayer(u32),
-
-    SparkWall,
 }
 
 #[derive(Copy, Clone)]
@@ -643,18 +739,6 @@ impl CSquare {
         self.top_left.x < other.bottom_right.x && self.bottom_right.x > other.top_left.x &&
         self.top_left.y < other.bottom_right.y && self.bottom_right.y > other.top_left.y
     }
-
-    // fn intersection(&self, other: CSquare) -> Option<(Vector, Vector)> {
-    //     if self.top_left.x < other.bottom_right.x && self.bottom_right.x > other.top_left.x &&
-    //        self.top_left.y < other.bottom_right.y &&
-    //        self.bottom_right.y > other.top_left.y {
-    //         let top_left = Vector::new(other.top_left.x, self.top_left.y);
-    //         let size = self.bottom_right - other.top_left;
-    //         Some((top_left, top_left + size))
-    //     } else {
-    //         None
-    //     }
-    // }
 
     fn contains(&self, p: Vector) -> bool {
         self.top_left.x < p.x && self.bottom_right.x > p.x && self.top_left.y < p.y &&
@@ -688,9 +772,10 @@ fn circle_intersects_square(c: CCircle, s: CSquare) -> bool {
 #[derive(PartialEq)]
 struct Player {
     name: String,
-    pos: Vector,
     dir: Vector,
+    pos: Vector,
     vel: Vector,
+    force: Vector,
 }
 #[derive(PartialEq)]
 struct Wall {
@@ -730,7 +815,7 @@ impl Pixel {
     fn color(&self) -> Color {
         match *self {
             Pixel::Black => BLACK,
-            Pixel::White => WHITE,
+            Pixel::White => color::grey(0.9),
             Pixel::Green => GREEN,
             Pixel::Grey => color::grey(0.1),
         }
@@ -780,25 +865,26 @@ fn as_line(v1: Vector, v2: Vector) -> [f64; 4] {
 
 fn update_player(p: &mut Player, state: &mut State, dt: f32) {
 
-    let move_amount = |start: time::Instant| {
+    let move_force = |start: time::Instant| {
         let t = into_secs(start.elapsed()) as f32;
         let d = dt * 2.0;
-        (d / (t + 1.5) + d)
+        (d / (t + 1.5) + d);
+        40.0
     };
 
-    p.vel = Vector::default();
+    p.force = Vector::default();
 
     if let Some(&t) = state.buttons_down.get(&Button::Keyboard(Key::A)) {
-        p.vel.x -= move_amount(t);
+        p.force.x -= move_force(t);
     }
     if let Some(&t) = state.buttons_down.get(&Button::Keyboard(Key::D)) {
-        p.vel.x += move_amount(t);
+        p.force.x += move_force(t);
     }
     if let Some(&t) = state.buttons_down.get(&Button::Keyboard(Key::W)) {
-        p.vel.y -= move_amount(t);
+        p.force.y -= move_force(t);
     }
     if let Some(&t) = state.buttons_down.get(&Button::Keyboard(Key::S)) {
-        p.vel.y += move_amount(t);
+        p.force.y += move_force(t);
     }
 
     let (width, height) = state.window_size;
