@@ -10,6 +10,7 @@ extern crate ludomath;
 extern crate ezing as ez;
 extern crate bincode as bc;
 extern crate recurse_arena as ra;
+extern crate image;
 
 use ra::{GameState, LOGO, LOGO_WIDTH, LOGO_HEIGHT, PLAYER_RADIUS, BULLET_RADIUS, CSquare, IntoSecs};
 
@@ -24,12 +25,14 @@ use piston::window::*;
 use piston::event_loop::*;
 use piston::input::*;
 use glutin_window::GlutinWindow;
-use opengl_graphics::{GlGraphics, OpenGL};
+use opengl_graphics::{GlGraphics, OpenGL, Texture, TextureSettings};
 use opengl_graphics::glyph_cache::GlyphCache;
 use graphics::*;
+use graphics::draw_state::*;
 use graphics::types::{Color, Matrix2d};
 use ludomath::vec2d::*;
 use ludomath::rng::Rng;
+use image::GenericImage;
 
 const ADDR: &str = "localhost:8000";
 
@@ -44,6 +47,10 @@ const TAU: f64 = 6.2831853;
 const SPARK_RADIUS: f32 = 0.01;
 
 static FONT: &[u8] = include_bytes!("../assets/FiraSans-Regular.ttf");
+static GLOW: &[u8] = include_bytes!("../assets/green.png");
+static BLUR: &[u8] = include_bytes!("../assets/blur.png");
+static PUFF: &[u8] = include_bytes!("../assets/puff.png");
+static SPRITE: &[u8] = include_bytes!("../assets/logo.png");
 
 fn main() {
     let mut stream = connect();
@@ -56,7 +63,17 @@ fn main() {
         .build()
         .unwrap();
 
-    let mut cache = GlyphCache::from_bytes(FONT).unwrap();
+    fn load(image: &[u8]) -> Texture {
+        let dyn = image::load_from_memory_with_format(image, image::ImageFormat::PNG).unwrap();
+        Texture::from_image(&dyn.to_rgba(), &TextureSettings::new())
+    }
+
+    let glow = load(GLOW);
+    let blur = load(BLUR);
+    let puff = load(PUFF);
+    let sprite = load(SPRITE);
+
+    let cache = GlyphCache::from_bytes(FONT).unwrap();
     let mut gl = GlGraphics::new(opengl);
     let mut events = Events::new(EventSettings::new());
     let (sender, reciever) = channel();
@@ -68,12 +85,19 @@ fn main() {
 
     let mut stage = Stage::Menu(menu);
 
+    let mut assets = Assets {
+        cache,
+        glow,
+        blur,
+        puff,
+        sprite,
+    };
 
     while let Some(e) = events.next(&mut window) {
         stage = step(e,
                      stage,
                      &mut gl,
-                     &mut cache,
+                     &mut assets,
                      &mut window,
                      &mut stream,
                      &sender,
@@ -81,10 +105,18 @@ fn main() {
     }
 }
 
+struct Assets<'a> {
+    cache: GlyphCache<'a>,
+    glow: Texture,
+    blur: Texture,
+    puff: Texture,
+    sprite: Texture,
+}
+
 fn step(e: Input,
         stage: Stage,
         gl: &mut GlGraphics,
-        mut cache: &mut GlyphCache,
+        assets: &mut Assets,
         window: &mut GlutinWindow,
         mut stream: &mut TcpStream,
         sender: &Sender<GameState>,
@@ -159,9 +191,11 @@ fn step(e: Input,
                             last_tick: time::Instant::now(),
                             rng: Rng::new(),
                             begin_time: time::Instant::now(),
+                            flash: time::Instant::now() - time::Duration::from_secs(10),
                         };
 
                         let player = ra::Player {
+                            health: 100.0,
                             id: player_id,
                             name: player_name,
                             dir: Vector::default(),
@@ -199,7 +233,8 @@ fn step(e: Input,
                         clear(WHITE, g);
 
                         let elapsed = state.begin_time.elapsed().into_secs().min(1.0);
-                        let centered = c.transform
+                        let original = c.transform;
+                        let centered = original
                             .trans(a.width as f64 / 2.0, a.height as f64 / 2.0)
                             .zoom(ez::expo_in(elapsed) as f64 * 300.0);
 
@@ -207,12 +242,16 @@ fn step(e: Input,
 
                         let tracking = centered.trans(-px, -py);
 
-                        let transforms = Transforms { centered, tracking };
+                        let transforms = Transforms {
+                            original,
+                            centered,
+                            tracking,
+                        };
 
                         let mut ctx = RenderContext {
                             transforms: &transforms,
                             g,
-                            cache: &mut cache,
+                            assets,
                         };
 
                         state.draw(&mut ctx);
@@ -221,7 +260,6 @@ fn step(e: Input,
                 Input::Update(_) => {
                     let dt = state.last_tick.elapsed().into_secs();
                     state.last_tick = time::Instant::now();
-
                     let Size { width, height } = window.draw_size();
                     state.window_size = (width, height);
 
@@ -234,7 +272,7 @@ fn step(e: Input,
 
                     for event in events {
                         match event {
-                            ra::Event::BulletHitWall(pos, vel) => {
+                            ra::Event::BulletHitWall(ra::Bullet { pos, vel, .. }) => {
                                 // spawn sparks
                                 let n = state.rng.rand_int(5, 10);
                                 for _ in 0..n {
@@ -250,6 +288,14 @@ fn step(e: Input,
                                     };
 
                                     state.particles.push(Particle::Spark(spark));
+                                }
+                            }
+                            ra::Event::BulletHitPlayer(_b, pid, _damage_fraction) => {
+                                // flash player?
+
+                                if pid == state.player_id {
+                                    // flash screen?
+                                    state.flash = time::Instant::now();
                                 }
                             }
                         }
@@ -307,7 +353,7 @@ fn step(e: Input,
 
 fn send_input(stream: &mut TcpStream, msg: &ra::ToServerMsg) {
     if let Err(e) = bc::serialize_into(stream, &msg, bc::Infinite) {
-        println!("Error while sending input: {}", e);
+        panic!("Error while sending input: {}", e);
     }
 }
 
@@ -356,6 +402,7 @@ struct State {
     last_tick: time::Instant,
     rng: Rng,
     begin_time: time::Instant,
+    flash: time::Instant,
 }
 
 impl State {
@@ -376,24 +423,36 @@ impl State {
             }
         }
 
-        // TODO: add bullet = player colors
-        for &ra::Bullet { pos, vel, .. } in &self.game_state.bullets {
-            let vo = pos + vel.normalize() * -0.1;
-            let shape = line::Line::new([1.0, 0.2, 0.0, 0.9], 0.005);
-            let ds = DrawState::default().blend(draw_state::Blend::Add);
-            shape.draw(as_line(vo, pos), &ds, ctx.transforms.tracking, ctx.g);
+        for &ra::Bullet { pos, vel, pid, .. } in &self.game_state.bullets {
+            let mut color = ra::color_for_id(pid);
+            color[0] = (color[0] * 2.0).min(1.0);
+            color[1] = (color[1] * 2.0).min(1.0);
+            color[2] = (color[2] * 2.0).min(1.0);
+
+            let (x, y) = as_f64s(pos);
+            let ds = DrawState::default().blend(Blend::Add).blend(Blend::Alpha);
+
+            let transform = ctx.transforms
+                .tracking
+                .trans(x, y)
+                .zoom(1.0 / 600.0)
+                .rot_rad(vel.angle_rad() as f64)
+                .scale(1.5, 0.7)
+                .trans(-44.0, -16.0);
+            graphics::image::Image::new_color(color).draw(&ctx.assets.blur, &ds, transform, ctx.g);
         }
 
         for &ra::Player {
                 id,
                 pos,
                 dir,
+                health,
                 ref name,
                 ..
             } in self.game_state.players.values() {
 
+            let color = ra::color_for_id(id);
             let (px, py) = as_f64s(pos);
-            let player_box = rectangle::centered_square(px, py, PLAYER_RADIUS as f64);
 
             let dir = if id == self.player_id {
                 self.player_dir() // use local info
@@ -401,34 +460,56 @@ impl State {
                 dir
             };
 
-            let end_point = pos + dir * PLAYER_RADIUS;
+            let ds = DrawState::default().blend(Blend::Add).blend(Blend::Alpha);
+            let r = dir.angle_rad() as f64 - TAU * 0.25;
 
-            circle_arc(RED,
-                       0.03,
-                       0.0,
-                       TAU,
-                       player_box,
-                       ctx.transforms.tracking,
-                       ctx.g);
-            line(RED,
-                 0.01,
-                 as_line(pos, end_point),
-                 ctx.transforms.tracking,
-                 ctx.g);
-            text(RED,
-                 20,
-                 name,
-                 ctx.cache,
-                 ctx.transforms
-                     .tracking
-                     .trans(px, py)
-                     .trans(-PLAYER_RADIUS as f64, -PLAYER_RADIUS as f64 * 1.3)
-                     .zoom(1.0 / 300.0),
-                 ctx.g);
+            let transform = ctx.transforms
+                .tracking.trans(px, py)
+                .zoom(1.0 / 600.0)
+                .rot_rad(r)
+                .trans(-100.0, -125.0);
+            graphics::image::Image::new_color(color)
+                .draw(&ctx.assets.sprite, &ds, transform, ctx.g);
+
+            if id != self.player_id {
+                text(color,
+                     20,
+                     &format!("{} | {}", name, health.max(0.0) as u32),
+                     &mut ctx.assets.cache,
+                     ctx.transforms
+                         .tracking
+                         .trans(px, py)
+                         .trans(-PLAYER_RADIUS as f64, -PLAYER_RADIUS as f64 * 1.3)
+                         .zoom(1.0 / 300.0),
+                     ctx.g);
+            }
         }
 
         for p in &self.particles {
             p.draw(self, ctx);
+        }
+
+        for y in 0..LOGO_HEIGHT {
+            for x in 0..LOGO_WIDTH {
+                if logo(x, y) == GREEN {
+                    graphics::image(&ctx.assets.glow,
+                                    ctx.transforms
+                                        .tracking
+                                        .trans(x as f64, y as f64)
+                                        .zoom(1.0 / 100.0)
+                                        .trans(-14.0, -14.0),
+                                    ctx.g)
+                }
+            }
+        }
+
+        let f_duration = 0.3;
+        let flash = self.flash.elapsed().into_secs().min(f_duration) / f_duration;
+        if flash < 1.0 {
+            let color = 1.0 - ez::cubic_out(flash);
+            let (w, h) = self.window_size;
+            let r = rectangle::rectangle_by_corners(0.0, 0.0, w as f64, h as f64);
+            rectangle([color, 0.0, 0.0, 0.2], r, ctx.transforms.original, ctx.g);
         }
     }
 }
@@ -439,20 +520,26 @@ enum Particle {
 
 impl Particle {
     fn draw(&self, _state: &State, ctx: &mut RenderContext) {
-        let RenderContext {
-            transforms,
-            ref mut g,
-            ..
-        } = *ctx;
-
         match *self {
-            Particle::Spark(Spark { pos, life, .. }) => {
+            Particle::Spark(Spark { pos, life, vel, .. }) => {
                 let (x, y) = as_f64s(pos);
-                let shape = ellipse::Ellipse::new([1.0, 1.0 * life, 0.0, life]);
-                let tile = rectangle::centered_square(x, y, (SPARK_RADIUS * 2.0 * life) as f64);
-                let ds = DrawState::default().blend(draw_state::Blend::Add);
+                let color = [1.0, 1.0 * life, 0.0, life];
+                let ds = DrawState::default().blend(Blend::Add).blend(Blend::Alpha);
+                let vm = vel.magnitude() as f64;
+                let r = (pos.x + pos.y + vel.x + vel.y + life * 10.0) as f64;
+                let life = life as f64;
 
-                shape.draw(tile, &ds, transforms.tracking, *g);
+                let transform = ctx.transforms
+                    .tracking
+                    .trans(x, y)
+                    .zoom(1.0 / 600.0)
+                    .rot_rad(vel.angle_rad() as f64)
+                    .scale(life * (vm * 100.0).max(1.0), life)
+                    .rot_rad(r * 10.0)
+                    .trans(-16.0, -16.0);
+
+                graphics::image::Image::new_color(color)
+                    .draw(&ctx.assets.puff, &ds, transform, ctx.g);
             }
         }
     }
@@ -479,33 +566,15 @@ struct Spark {
 }
 
 struct Transforms {
+    original: Matrix2d,
     centered: Matrix2d,
     tracking: Matrix2d,
-}
-
-#[derive(Copy, Clone, PartialEq)]
-enum Pixel {
-    Black,
-    White,
-    Green,
-    Grey,
-}
-
-impl Pixel {
-    fn color(&self) -> Color {
-        match *self {
-            Pixel::Black => BLACK,
-            Pixel::White => color::grey(0.9),
-            Pixel::Green => GREEN,
-            Pixel::Grey => color::grey(0.1),
-        }
-    }
 }
 
 struct RenderContext<'a, 'b: 'a> {
     transforms: &'a Transforms,
     g: &'a mut GlGraphics,
-    cache: &'a mut GlyphCache<'b>,
+    assets: &'a mut Assets<'b>,
 }
 
 fn logo(x: usize, y: usize) -> Color {
@@ -517,17 +586,12 @@ fn logo(x: usize, y: usize) -> Color {
 
     match pixel {
         b'b' => BLACK,
-        b'w' | b'i' => color::grey(0.9),
+        b'w' => color::grey(0.8),
+        b'i' => WHITE,
         b'g' => GREEN,
-        b'f' => color::grey(0.1),
+        b'f' => color::grey(0.18),
         _ => unreachable!(),
     }
-}
-
-fn into_secs(d: time::Duration) -> f64 {
-    let secs = d.as_secs() as f64;
-    let nanos = d.subsec_nanos() as f64;
-    secs + nanos / 1_000_000_000.0
 }
 
 fn f(x: f32) -> f64 {

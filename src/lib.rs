@@ -2,6 +2,7 @@
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
+extern crate hsl;
 extern crate ludomath;
 
 use std::time::Duration;
@@ -19,7 +20,7 @@ pub const LOGO: &[&str] = &["bbbbbbbbbbbb",
                             "bwffffffffwb",
                             "bwwwwwwwwwwb",
                             "bbbbffffbbbb",
-                            "wwwibffbiwww",
+                            "iiiibffbiiii",
                             "ibbbffffbbbi",
                             "bfbwfwfwbwfb",
                             "bfwfwbwfwffb",
@@ -30,6 +31,8 @@ pub const LOGO_HEIGHT: usize = 15;
 
 pub const PLAYER_RADIUS: f32 = 0.2;
 pub const BULLET_RADIUS: f32 = 0.05;
+
+pub const MAX_DAMAGE: f32 = 10.0;
 
 #[derive(Copy, Clone)]
 pub struct CSquare {
@@ -81,7 +84,7 @@ impl CCircle {
 
     pub fn intersects_square(self, s: &CSquare) -> bool {
         let s_center = s.top_left + (s.bottom_right - s.top_left) * 0.5;
-        let v = (self.center - s_center).normalize();
+        let v = (s_center - self.center).normalize();
         let outer_point = self.center + self.radius * v;
         s.contains(outer_point)
     }
@@ -124,14 +127,48 @@ impl GameState {
         self.events.clear();
 
         for p in self.players.values_mut() {
-            p.update(collision_boxes, dt);
+            let p_bounds = CCircle::new(p.pos, PLAYER_RADIUS);
+
+            for i in (0..self.bullets.len()).rev() {
+                if self.bullets[i].pid == p.id {
+                    continue;
+                }
+
+                let b_bounds = CCircle::new(self.bullets[i].pos, BULLET_RADIUS);
+
+                if b_bounds.intersects(p_bounds) {
+                    let b = self.bullets.remove(i);
+                    let f = calc_damage(&b, p);
+                    let d = f * MAX_DAMAGE;
+                    p.health -= d;
+                    self.events.push(Event::BulletHitPlayer(b, p.id, f));
+                }
+            }
+
+            for cb in collision_boxes {
+                if p_bounds.intersects_square(cb) {
+                    let wc = cb.top_left + Vector::new(0.5, 0.5);
+                    let overlap = p.pos - wc;
+                    p.force += overlap * 20000.0 * dt;
+                }
+            }
+
+            p.vel += p.force * dt;
+
+            // Critical that vel doesn't go denormal/too small!
+            // I found that out the hard way after much hardship and long suffering
+            if p.vel.magnitude() < 0.0000001 {
+                p.vel = Vector::default();
+            }
+
+            p.vel = p.vel.magnitude().min(40.0) * p.vel.normalize() * 0.9;
+            p.pos += p.vel * dt;
         }
 
         for i in (0..self.bullets.len()).rev() {
             if self.bullets[i].update(collision_boxes, dt) {
-                self.events
-                    .push(Event::BulletHitWall(self.bullets[i].pos, self.bullets[i].vel));
-                self.bullets.remove(i);
+                let b = self.bullets.remove(i);
+                self.events.push(Event::BulletHitWall(b));
             }
         }
     }
@@ -139,11 +176,8 @@ impl GameState {
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub enum Event {
-    // pos, vel
-    BulletHitWall(#[serde(with = "VectorDef")]
-                  Vector,
-                  #[serde(with = "VectorDef")]
-                  Vector),
+    BulletHitWall(Bullet),
+    BulletHitPlayer(Bullet, PlayerId, f32),
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
@@ -180,7 +214,6 @@ impl Bullet {
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct Player {
-    pub id: PlayerId,
     pub name: String,
     #[serde(with = "VectorDef")]
     pub dir: Vector,
@@ -190,33 +223,16 @@ pub struct Player {
     pub vel: Vector,
     #[serde(with = "VectorDef")]
     pub force: Vector,
+    pub id: PlayerId,
+    pub health: f32,
 }
 
-impl Player {
-    pub fn update(&mut self, collision_boxes: &[CSquare], dt: f32) {
-        let p_bounds = CSquare::new_centered(self.pos, PLAYER_RADIUS * 1.1);
-
-        for cb in collision_boxes {
-            if cb.intersects(p_bounds) {
-                let wc = cb.top_left + Vector::new(0.5, 0.5);
-                self.force += (self.pos - wc) * 100.0;
-            }
-        }
-
-        self.vel += self.force * dt;
-
-        let vm = self.vel.magnitude();
-
-        // Critical that vm doesn't go denormal/too small!
-        // I found that out the hard way after much hardship and long suffering
-        if vm > 0.0000001 {
-            self.vel = self.vel.normalize() * vm.min(40.0) * 0.9;
-        } else {
-            self.vel = Vector::default();
-        }
-
-        self.pos += self.vel * dt;
-    }
+pub fn calc_damage(bullet: &Bullet, player: &Player) -> f32 {
+    let f = (bullet.pos - player.pos)
+        .normalize()
+        .dot(bullet.vel.normalize())
+        .abs();
+    f * f * f
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -238,8 +254,9 @@ pub enum Input {
           #[serde(with = "VectorDef")]
           Vector),
     Release(Button),
-    
-    DirChanged(#[serde(with = "VectorDef")] Vector),
+
+    DirChanged(#[serde(with = "VectorDef")]
+               Vector),
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -264,6 +281,16 @@ impl IntoSecs for Duration {
         let nanos = self.subsec_nanos() as f32;
         secs + nanos / 1_000_000_000.0
     }
+}
+
+pub fn color_for_id(id: PlayerId) -> [f32; 4] {
+    let (r, g, b) = hsl::HSL {
+            h: id.0 as f64 * 254656.0 % 360.0,
+            s: 0.6,
+            l: 0.4,
+        }
+        .to_rgb();
+    [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
 }
 
 #[derive(Serialize, Deserialize)]

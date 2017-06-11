@@ -69,7 +69,10 @@ fn main() {
                     id: player_id,
                     name: player_name,
                     pos,
-                    ..Default::default()
+                    health: 100.0,
+                    dir: Vector::new(1.0, 0.0),
+                    force: Vector::default(),
+                    vel: Vector::default(),
                 };
 
                 game_state.players.insert(player_id, player);
@@ -278,6 +281,8 @@ fn next_player_id() -> PlayerId {
 }
 
 fn spawn_player(ls: &mut LocalState, gs: &GameState) -> Vector {
+    let cmp_f = |a: f32, b: f32| a.partial_cmp(&b).unwrap_or(Ordering::Equal);
+
     let mut empty_tiles = vec![];
 
     for y in 0..LOGO_HEIGHT {
@@ -296,9 +301,11 @@ fn spawn_player(ls: &mut LocalState, gs: &GameState) -> Vector {
     }
 
     if gs.players.is_empty() {
+        // random tile
         return empty_tiles[ls.rng.rand_uint(0, empty_tiles.len() as u64) as usize];
     }
 
+    // tile furthest away from any player
     let idx = empty_tiles
         .iter()
         .cloned()
@@ -307,11 +314,11 @@ fn spawn_player(ls: &mut LocalState, gs: &GameState) -> Vector {
                  let shortest = gs.players
                      .values()
                      .map(|p| p.pos.dist(pos))
-                     .min_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
+                     .min_by(|&a, &b| cmp_f(a, b))
                      .unwrap();
                  (i, shortest)
              })
-        .max_by(|&(_, a), &(_, b)| a.partial_cmp(&b).unwrap_or(Ordering::Equal))
+        .max_by(|&(_, a), &(_, b)| cmp_f(a, b))
         .map(|(i, _)| i)
         .unwrap();
 
