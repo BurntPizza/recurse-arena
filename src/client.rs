@@ -5,20 +5,26 @@ extern crate graphics;
 extern crate glutin_window;
 extern crate glutin;
 extern crate opengl_graphics;
-extern crate find_folder;
+// extern crate find_folder;
 extern crate ludomath;
 extern crate ezing as ez;
 extern crate bincode as bc;
 extern crate recurse_arena as ra;
 extern crate image;
+extern crate tempfile;
+extern crate ears;
 
-use ra::{GameState, LOGO, LOGO_WIDTH, LOGO_HEIGHT, PLAYER_RADIUS, BULLET_RADIUS, CSquare, IntoSecs};
+use ra::{GameState, LOGO, LOGO_WIDTH, LOGO_HEIGHT, PLAYER_HEALTH, PLAYER_RADIUS, BULLET_RADIUS,
+         CSquare, IntoSecs};
 
 use std::collections::HashMap;
 use std::time;
 use std::net::TcpStream;
 use std::sync::mpsc::{channel, Sender, Receiver};
 use std::thread;
+use std::fs::File;
+use std::io::prelude::*;
+use std::io::{self, BufReader};
 
 
 use piston::window::*;
@@ -31,8 +37,10 @@ use graphics::*;
 use graphics::draw_state::*;
 use graphics::types::{Color, Matrix2d};
 use ludomath::vec2d::*;
+use ludomath::consts::*;
 use ludomath::rng::Rng;
-use image::GenericImage;
+use ears::AudioController;
+
 
 const ADDR: &str = "localhost:8000";
 
@@ -41,18 +49,32 @@ const GREEN: Color = [0.0, 0.9, 0.0, 1.0];
 const WHITE: Color = [1.0; 4];
 const RED: Color = [1.0, 0.0, 0.0, 1.0];
 
-const TAU: f64 = 6.2831853;
-
-
 const SPARK_RADIUS: f32 = 0.01;
 
-static FONT: &[u8] = include_bytes!("../assets/FiraSans-Regular.ttf");
+static FONT: &[u8] = include_bytes!("../assets/Charybdis.ttf");
+
 static GLOW: &[u8] = include_bytes!("../assets/green.png");
 static BLUR: &[u8] = include_bytes!("../assets/blur.png");
 static PUFF: &[u8] = include_bytes!("../assets/puff.png");
 static SPRITE: &[u8] = include_bytes!("../assets/logo.png");
 
+static SHOTS: &[&[u8]] = &[include_bytes!("../assets/Laser_Shoot1.ogg"),
+                           include_bytes!("../assets/Laser_Shoot2.ogg"),
+                           include_bytes!("../assets/Laser_Shoot3.ogg"),
+                           include_bytes!("../assets/Laser_Shoot4.ogg")];
+
+static HURTS: &[&[u8]] = &[include_bytes!("../assets/Hit_Hurt1.ogg"),
+                           include_bytes!("../assets/Hit_Hurt2.ogg"),
+                           include_bytes!("../assets/Hit_Hurt3.ogg"),
+                           include_bytes!("../assets/Hit_Hurt4.ogg")];
+
+static DEATH: &[u8] = include_bytes!("../assets/sfx_sound_shutdown1.ogg");
+static SPLAT: &[u8] = include_bytes!("../assets/Splat.ogg");
+static HIT: &[u8] = include_bytes!("../assets/Hitmarker.ogg");
+
+
 fn main() {
+    println!("Init ears: {}", ears::init());
     let mut stream = connect();
     let opengl = OpenGL::V3_2;
     let (full_width, full_height) = glutin::get_primary_monitor().get_dimensions();
@@ -73,6 +95,48 @@ fn main() {
     let puff = load(PUFF);
     let sprite = load(SPRITE);
 
+    let mut shots = vec![];
+    for shot in SHOTS {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        io::BufWriter::new(&mut file).write_all(shot).unwrap();
+        let mut sound = ears::Sound::new(file.path().to_str().unwrap()).unwrap();
+        sound.set_max_volume(0.2);
+        shots.push(sound);
+    }
+
+    let mut hurts = vec![];
+    for shot in HURTS {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        io::BufWriter::new(&mut file).write_all(shot).unwrap();
+        let mut sound = ears::Sound::new(file.path().to_str().unwrap()).unwrap();
+        sound.set_max_volume(0.4);
+        hurts.push(sound);
+    }
+
+    let death = {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        io::BufWriter::new(&mut file).write_all(DEATH).unwrap();
+        let mut sound = ears::Sound::new(file.path().to_str().unwrap()).unwrap();
+        sound.set_max_volume(0.3);
+        sound
+    };
+
+    let splat = {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        io::BufWriter::new(&mut file).write_all(SPLAT).unwrap();
+        let mut sound = ears::Sound::new(file.path().to_str().unwrap()).unwrap();
+        sound.set_max_volume(0.6);
+        sound
+    };
+
+    let hitmarker = {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        io::BufWriter::new(&mut file).write_all(HIT).unwrap();
+        let mut sound = ears::Sound::new(file.path().to_str().unwrap()).unwrap();
+        sound.set_max_volume(0.6);
+        sound
+    };
+
     let cache = GlyphCache::from_bytes(FONT).unwrap();
     let mut gl = GlGraphics::new(opengl);
     let mut events = Events::new(EventSettings::new());
@@ -91,6 +155,11 @@ fn main() {
         blur,
         puff,
         sprite,
+        shots,
+        hurts,
+        death,
+        splat,
+        hitmarker,
     };
 
     while let Some(e) = events.next(&mut window) {
@@ -111,6 +180,11 @@ struct Assets<'a> {
     blur: Texture,
     puff: Texture,
     sprite: Texture,
+    shots: Vec<ears::Sound>,
+    hurts: Vec<ears::Sound>,
+    death: ears::Sound,
+    splat: ears::Sound,
+    hitmarker: ears::Sound,
 }
 
 fn step(e: Input,
@@ -195,13 +269,14 @@ fn step(e: Input,
                         };
 
                         let player = ra::Player {
-                            health: 100.0,
+                            health: PLAYER_HEALTH,
                             id: player_id,
                             name: player_name,
-                            dir: Vector::default(),
+                            dir: VEC_RIGHT,
                             pos: Vector::new(1.5, 1.5),
-                            vel: Vector::default(),
-                            force: Vector::default(),
+                            vel: VEC_ZERO,
+                            force: VEC_ZERO,
+                            respawn_timer: 0.0,
                         };
 
                         state.game_state.players.insert(player_id, player);
@@ -289,14 +364,35 @@ fn step(e: Input,
 
                                     state.particles.push(Particle::Spark(spark));
                                 }
+                                
+                                state.play_sound_at(&mut assets.splat, pos);
                             }
-                            ra::Event::BulletHitPlayer(_b, pid, _damage_fraction) => {
-                                // flash player?
+
+                            ra::Event::BulletHitPlayer(b, pid, _damage_fraction) => {
+                                if b.pid == state.player_id {
+                                    assets.hitmarker.play();
+                                }
 
                                 if pid == state.player_id {
-                                    // flash screen?
                                     state.flash = time::Instant::now();
+                                    let i = state.rng.rand_uint(0, assets.hurts.len() as u64) as
+                                            usize;
+                                    let sound = &mut assets.hurts[i];
+                                    sound.play();
                                 }
+                            }
+
+                            ra::Event::PlayerDied(killed, killer) => {
+                                if state.player_id == killed {
+                                    assets.death.play();
+                                }
+                            }
+
+                            ra::Event::PlayerRespawned(id) => {}
+
+                            ra::Event::BulletFired(pos) => {
+                                let i = state.rng.rand_uint(0, assets.shots.len() as u64) as usize;
+                                state.play_sound_at(&mut assets.shots[i], pos);
                             }
                         }
                     }
@@ -406,6 +502,13 @@ struct State {
 }
 
 impl State {
+    fn play_sound_at(&self, sound: &mut ears::Sound, pos: Vector) {
+        sound.set_relative(true);
+        let spos = (pos - self.player_pos()) * 5.0;
+        sound.set_position([spos.x, -spos.y, 0.0]);
+        sound.play();
+    }
+
     fn player_pos(&self) -> Vector {
         self.game_state.players[&self.player_id].pos
     }
@@ -447,6 +550,7 @@ impl State {
                 pos,
                 dir,
                 health,
+                respawn_timer,
                 ref name,
                 ..
             } in self.game_state.players.values() {
@@ -461,10 +565,11 @@ impl State {
             };
 
             let ds = DrawState::default().blend(Blend::Add).blend(Blend::Alpha);
-            let r = dir.angle_rad() as f64 - TAU * 0.25;
+            let r = dir.angle_rad() as f64 - TAU as f64 * 0.25;
 
             let transform = ctx.transforms
-                .tracking.trans(px, py)
+                .tracking
+                .trans(px, py)
                 .zoom(1.0 / 600.0)
                 .rot_rad(r)
                 .trans(-100.0, -125.0);
@@ -482,6 +587,9 @@ impl State {
                          .trans(-PLAYER_RADIUS as f64, -PLAYER_RADIUS as f64 * 1.3)
                          .zoom(1.0 / 300.0),
                      ctx.g);
+            } else if health == 0.0 {
+                self.flash = time::Instant::now(); // -
+                // time::Duration::from_millis((respawn_timer * 1000.0) as u64);
             }
         }
 

@@ -16,6 +16,7 @@ use std::time::{Instant, Duration};
 
 use ludomath::rng::Rng;
 use ludomath::vec2d::*;
+use ludomath::consts::*;
 
 fn main() {
     let port = 8000;
@@ -47,62 +48,17 @@ fn main() {
     loop {
         let start = Instant::now();
 
-        // send new state to clients
-        {
-            // first establish any new clients
-            for Client {
-                    player_id,
-                    player_name,
-                    stream,
-                } in new_client_receiver.try_iter() {
+        // update game state
+        let needs_respawn = game_state.update(&*local_state.collision_boxes,
+                                              last_tick.elapsed().into_secs());
+        last_tick = Instant::now();
 
-                let player_state = LocalPlayerState {
-                    buttons_down: HashMap::new(),
-                    stream,
-                };
-
-                local_state.clients.insert(player_id, player_state);
-
-                let pos = spawn_player(&mut local_state, &game_state);
-
-                let player = Player {
-                    id: player_id,
-                    name: player_name,
-                    pos,
-                    health: 100.0,
-                    dir: Vector::new(1.0, 0.0),
-                    force: Vector::default(),
-                    vel: Vector::default(),
-                };
-
-                game_state.players.insert(player_id, player);
-            }
-
-            let mut data: Vec<u8> = Vec::with_capacity(512);
-            let msg = FromServerMsg::Update(game_state);
-
-            bc::serialize_into(&mut data, &msg, bc::Infinite).unwrap();
-
-            game_state = match msg {
-                FromServerMsg::Update(gs) => gs,
-                _ => unreachable!(),
-            };
-
-            let mut to_drop = vec![];
-
-            for (&id, &mut LocalPlayerState { ref mut stream, .. }) in
-                local_state.clients.iter_mut() {
-                if let Err(e) = stream.write_all(&data[..]) {
-                    println!("Game loop on client {}: ERROR: {}", id.0, e);
-                    to_drop.push(id);
-                }
-            }
-
-            for id in to_drop {
-                println!("Dropping client {}", id.0);
-                game_state.players.remove(&id);
-                local_state.clients.remove(&id);
-            }
+        for id in needs_respawn {
+            let pos = spawn_player(&mut local_state, &game_state);
+            let p = game_state.players.get_mut(&id).unwrap();
+            p.pos = pos;
+            p.health = PLAYER_HEALTH;
+            game_state.events.push(Event::PlayerRespawned(p.id));
         }
 
         // get inputs
@@ -118,6 +74,7 @@ fn main() {
 
                                     if b == Button::LeftMouse {
                                         // spawn bullet
+                                        game_state.events.push(Event::BulletFired(player.pos));
                                         game_state.bullets.push(Bullet::spawn(player));
                                     }
                                 }
@@ -162,10 +119,68 @@ fn main() {
             }
         }
 
-        // update game state
-        game_state.update(&*local_state.collision_boxes,
-                          last_tick.elapsed().into_secs());
-        last_tick = Instant::now();
+        // send new state to clients
+        {
+            // first establish any new clients
+            for Client {
+                    player_id,
+                    player_name,
+                    stream,
+                } in new_client_receiver.try_iter() {
+
+                let player_state = LocalPlayerState {
+                    buttons_down: HashMap::new(),
+                    stream,
+                };
+
+                local_state.clients.insert(player_id, player_state);
+
+                let pos = spawn_player(&mut local_state, &game_state);
+
+                let player = Player {
+                    id: player_id,
+                    name: player_name,
+                    pos,
+                    health: 100.0,
+                    dir: VEC_RIGHT,
+                    force: VEC_ZERO,
+                    vel: VEC_ZERO,
+                    respawn_timer: 0.0,
+                };
+
+                game_state.players.insert(player_id, player);
+            }
+
+            let mut data: Vec<u8> = Vec::with_capacity(512);
+            let msg = FromServerMsg::Update(game_state);
+
+            bc::serialize_into(&mut data, &msg, bc::Infinite).unwrap();
+
+            game_state = match msg {
+                FromServerMsg::Update(gs) => gs,
+                _ => unreachable!(),
+            };
+
+            let mut to_drop = vec![];
+
+            for (&id, &mut LocalPlayerState { ref mut stream, .. }) in
+                local_state.clients.iter_mut() {
+                if let Err(e) = stream.write_all(&data[..]) {
+                    println!("Game loop on client {}: ERROR: {}", id.0, e);
+                    to_drop.push(id);
+                }
+            }
+
+            for id in to_drop {
+                println!("Dropping client {}", id.0);
+                game_state.players.remove(&id);
+                local_state.clients.remove(&id);
+            }
+        }
+
+        
+
+        
 
         let delta = start.elapsed();
         desired_delta.checked_sub(delta).map(|d| thread::sleep(d));

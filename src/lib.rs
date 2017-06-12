@@ -8,6 +8,7 @@ extern crate ludomath;
 use std::time::Duration;
 use std::collections::HashMap;
 
+use ludomath::consts::*;
 use ludomath::vec2d::*;
 
 pub const LOGO: &[&str] = &["bbbbbbbbbbbb",
@@ -32,6 +33,7 @@ pub const LOGO_HEIGHT: usize = 15;
 pub const PLAYER_RADIUS: f32 = 0.2;
 pub const BULLET_RADIUS: f32 = 0.05;
 
+pub const PLAYER_HEALTH: f32 = 100.0;
 pub const MAX_DAMAGE: f32 = 10.0;
 
 #[derive(Copy, Clone)]
@@ -123,10 +125,20 @@ pub struct GameState {
 }
 
 impl GameState {
-    pub fn update(&mut self, collision_boxes: &[CSquare], dt: f32) {
+    // returns players to respawn
+    pub fn update(&mut self, collision_boxes: &[CSquare], dt: f32) -> Vec<PlayerId> {
+        let mut needs_respawn = vec![];
         self.events.clear();
 
-        for p in self.players.values_mut() {
+        'players: for p in self.players.values_mut() {
+            if p.health == 0.0 && p.respawn_timer > 0.0 {
+                p.respawn_timer = (p.respawn_timer - dt).max(0.0);
+                if p.respawn_timer == 0.0 {
+                    needs_respawn.push(p.id);
+                }
+                continue;
+            }
+
             let p_bounds = CCircle::new(p.pos, PLAYER_RADIUS);
 
             for i in (0..self.bullets.len()).rev() {
@@ -140,8 +152,15 @@ impl GameState {
                     let b = self.bullets.remove(i);
                     let f = calc_damage(&b, p);
                     let d = f * MAX_DAMAGE;
-                    p.health -= d;
+                    p.health = (p.health - d).max(0.0);
                     self.events.push(Event::BulletHitPlayer(b, p.id, f));
+
+                    if p.health == 0.0 {
+                        p.respawn_timer = 2.0;
+                        
+                        self.events.push(Event::PlayerDied(p.id, b.pid));
+                        continue 'players;
+                    }
                 }
             }
 
@@ -171,6 +190,8 @@ impl GameState {
                 self.events.push(Event::BulletHitWall(b));
             }
         }
+
+        needs_respawn
     }
 }
 
@@ -178,6 +199,10 @@ impl GameState {
 pub enum Event {
     BulletHitWall(Bullet),
     BulletHitPlayer(Bullet, PlayerId, f32),
+    BulletFired(#[serde(with = "VectorDef")] Vector),
+    // who died and who killed them
+    PlayerDied(PlayerId, PlayerId),
+    PlayerRespawned(PlayerId),
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
@@ -225,6 +250,7 @@ pub struct Player {
     pub force: Vector,
     pub id: PlayerId,
     pub health: f32,
+    pub respawn_timer: f32,
 }
 
 pub fn calc_damage(bullet: &Bullet, player: &Player) -> f32 {
