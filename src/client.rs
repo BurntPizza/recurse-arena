@@ -15,7 +15,6 @@ extern crate structopt;
 #[macro_use]
 extern crate structopt_derive;
 
-
 use ra::{GameState, LOGO, LOGO_WIDTH, LOGO_HEIGHT, PLAYER_HEALTH, PLAYER_RADIUS, IntoSecs};
 
 use std::io;
