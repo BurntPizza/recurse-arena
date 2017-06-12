@@ -15,8 +15,6 @@ env:
     - CRATE_NAME=recurse_arena
 
 matrix:
-  # TODO These are all the build jobs. Adjust as necessary. Comment out what you
-  # don't need
   include:
     # Linux
     - env: TARGET=i686-unknown-linux-gnu
@@ -32,7 +30,14 @@ matrix:
 
 before_install: 
   - set -e
-  - sudo apt-get install -y libopenal-data libopenal1 libsndfile1
+  - |
+    [ $TRAVIS_OS_NAME = linux ] || brew install openal-soft libsndfile
+  - sudo apt-get install -y libopenal-data libopenal1 libsndfile1 openal sndfile
+addons:
+  apt:
+    packages:
+    - libopenal-dev
+    - libsndfile1-dev
 
 install:
   - sh ci/install.sh
@@ -47,10 +52,6 @@ before_deploy:
   - sh ci/before_deploy.sh
 
 deploy:
-  # TODO update `api_key.secure`
-  # - Create a `public_repo` GitHub token. Go to: https://github.com/settings/tokens/new
-  # - Encrypt it: `travis encrypt 0123456789012345678901234567890123456789
-  # - Paste the output down here
   api_key:
     secure: PTQnyZQOvpHB/nZ12+p4XCOoBE41u8PkddXr93b1++7Ouws9ldtyMXWyrC09HSmVt2ECZ275LYk+0zm7iS8xrrFzgt7Lk99NAcwyVlUHjunPW+SNB5Y2wKtp0ChjAEsilpIx8Io/VfI9tX7DnCAkgMdiyrzT4koxT8bCPQiOy+Gwfgt9MvsB9AO1NDi5doES6PtLCkLN2MeiFq7giwxcclZ5pKMZVWTL/iz1eajTqcZPUR5JLq7oSkj/1cLH/nUPE/aYBy7RW0yGR9ervrC3TLsw/rgC82+VUriOIJpBTGybwEvBgR9GA9T0RFL4pK0wAZSt/er0soFGdRTvoosvb8G/5Po9p66xH0Xiq72usk7xcrkZmyokS7n8J00xvAnnn0gNwOdYDwkNXc1Usr18gKToPwXLuhzSXw1sotTl/eykH05ep3Ei0K8wwCUrHdHRDGmnEuThQ4n19971pugLg4vdRhmXRt4Z6cuhLeNaNvCV9DkzaQUv2piinCB4pdhv2RbYc6Cd9u1kmx1xXY8dQQx5iSxrYaBBFaBPT1fbLyn1ebETZrvNGBLynDhYj2/Qbx8qUZFBDbDDfrLEQYQRhTR62DSr9b64/bjAvIQJPclmFT+CDZq8jv0KnTbSFx2kS2X0v0HRb2AkZrNR7nPAtlPTL+akjqgoSkn5hsCNILA=
   file_glob: true
