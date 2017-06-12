@@ -45,6 +45,8 @@ fn main() {
     let desired_delta = Duration::from_millis(1000 / ups);
     let mut last_tick = Instant::now();
 
+    let mut left = vec![];
+
     loop {
         let start = Instant::now();
 
@@ -52,6 +54,8 @@ fn main() {
         let needs_respawn = game_state.update(&*local_state.collision_boxes,
                                               last_tick.elapsed().into_secs());
         last_tick = Instant::now();
+
+        game_state.events.extend(left.drain(..));
 
         for id in needs_respawn {
             let pos = spawn_player(&mut local_state, &game_state);
@@ -147,7 +151,8 @@ fn main() {
                     vel: VEC_ZERO,
                     respawn_timer: 0.0,
                 };
-
+                
+                game_state.events.push(Event::PlayerJoined(player_id));
                 game_state.players.insert(player_id, player);
             }
 
@@ -173,8 +178,9 @@ fn main() {
 
             for id in to_drop {
                 println!("Dropping client {}", id.0);
-                game_state.players.remove(&id);
+                let player = game_state.players.remove(&id).unwrap();
                 local_state.clients.remove(&id);
+                left.push(Event::PlayerLeft(player.name));
             }
         }
 

@@ -130,6 +130,10 @@ impl GameState {
         let mut needs_respawn = vec![];
         self.events.clear();
 
+        // 'players: for i in 0..self.players.len() {
+        //     let p = self.players[i].;
+        // }        
+
         'players: for p in self.players.values_mut() {
             if p.health == 0.0 && p.respawn_timer > 0.0 {
                 p.respawn_timer = (p.respawn_timer - dt).max(0.0);
@@ -195,7 +199,7 @@ impl GameState {
     }
 }
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Event {
     BulletHitWall(Bullet),
     BulletHitPlayer(Bullet, PlayerId, f32),
@@ -203,6 +207,8 @@ pub enum Event {
     // who died and who killed them
     PlayerDied(PlayerId, PlayerId),
     PlayerRespawned(PlayerId),
+    PlayerJoined(PlayerId),
+    PlayerLeft(String),
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]

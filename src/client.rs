@@ -1,15 +1,14 @@
 #![allow(non_snake_case)]
 
+extern crate recurse_arena as ra;
 extern crate piston;
 extern crate graphics;
 extern crate glutin_window;
 extern crate glutin;
 extern crate opengl_graphics;
-// extern crate find_folder;
 extern crate ludomath;
 extern crate ezing as ez;
 extern crate bincode as bc;
-extern crate recurse_arena as ra;
 extern crate image;
 extern crate tempfile;
 extern crate ears;
@@ -17,15 +16,13 @@ extern crate ears;
 use ra::{GameState, LOGO, LOGO_WIDTH, LOGO_HEIGHT, PLAYER_HEALTH, PLAYER_RADIUS, BULLET_RADIUS,
          CSquare, IntoSecs};
 
-use std::collections::HashMap;
-use std::time;
-use std::net::TcpStream;
-use std::sync::mpsc::{channel, Sender, Receiver};
+use std::io;
+use std::time::{Instant, Duration};
 use std::thread;
-use std::fs::File;
 use std::io::prelude::*;
-use std::io::{self, BufReader};
-
+use std::net::TcpStream;
+use std::collections::{HashMap, VecDeque};
+use std::sync::mpsc::{channel, Sender, Receiver};
 
 use piston::window::*;
 use piston::event_loop::*;
@@ -35,6 +32,7 @@ use opengl_graphics::{GlGraphics, OpenGL, Texture, TextureSettings};
 use opengl_graphics::glyph_cache::GlyphCache;
 use graphics::*;
 use graphics::draw_state::*;
+use graphics::character::CharacterCache;
 use graphics::types::{Color, Matrix2d};
 use ludomath::vec2d::*;
 use ludomath::consts::*;
@@ -48,8 +46,6 @@ const BLACK: Color = [0.0, 0.0, 0.0, 1.0];
 const GREEN: Color = [0.0, 0.9, 0.0, 1.0];
 const WHITE: Color = [1.0; 4];
 const RED: Color = [1.0, 0.0, 0.0, 1.0];
-
-const SPARK_RADIUS: f32 = 0.01;
 
 static FONT: &[u8] = include_bytes!("../assets/Charybdis.ttf");
 
@@ -262,10 +258,11 @@ fn step(e: Input,
                             buttons_down: HashMap::new(),
                             particles: vec![],
                             player_dir: Vector::default(),
-                            last_tick: time::Instant::now(),
+                            last_tick: Instant::now(),
                             rng: Rng::new(),
-                            begin_time: time::Instant::now(),
-                            flash: time::Instant::now() - time::Duration::from_secs(10),
+                            begin_time: Instant::now(),
+                            flash: Instant::now() - Duration::from_secs(10),
+                            messages: VecDeque::new(),
                         };
 
                         let player = ra::Player {
@@ -286,7 +283,7 @@ fn step(e: Input,
                 }
                 Input::Press(button) => {
                     if !menu.buttons_down.contains_key(&button) {
-                        menu.buttons_down.insert(button, time::Instant::now());
+                        menu.buttons_down.insert(button, Instant::now());
                     }
                 }
                 Input::Release(button) => {
@@ -334,7 +331,7 @@ fn step(e: Input,
                 }
                 Input::Update(_) => {
                     let dt = state.last_tick.elapsed().into_secs();
-                    state.last_tick = time::Instant::now();
+                    state.last_tick = Instant::now();
                     let Size { width, height } = window.draw_size();
                     state.window_size = (width, height);
 
@@ -364,7 +361,7 @@ fn step(e: Input,
 
                                     state.particles.push(Particle::Spark(spark));
                                 }
-                                
+
                                 state.play_sound_at(&mut assets.splat, pos);
                             }
 
@@ -374,7 +371,7 @@ fn step(e: Input,
                                 }
 
                                 if pid == state.player_id {
-                                    state.flash = time::Instant::now();
+                                    state.flash = Instant::now();
                                     let i = state.rng.rand_uint(0, assets.hurts.len() as u64) as
                                             usize;
                                     let sound = &mut assets.hurts[i];
@@ -386,6 +383,18 @@ fn step(e: Input,
                                 if state.player_id == killed {
                                     assets.death.play();
                                 }
+
+
+                                let killed = state.game_state.players[&killed].name.clone();
+                                let killer = state.game_state.players[&killer].name.clone();
+                                let msgs = [format!("{} was killed by {}", killed, killer),
+                                            format!("{} got wrecked by {}", killed, killer),
+                                            format!("{} was annihilated by {}", killed, killer),
+                                            format!("{} didn't see {}", killed, killer)];
+
+                                let i = state.rng.rand_uint(0, msgs.len() as u64) as usize;
+
+                                state.messages.push_front((msgs[i].clone(), Instant::now()));
                             }
 
                             ra::Event::PlayerRespawned(id) => {}
@@ -393,6 +402,23 @@ fn step(e: Input,
                             ra::Event::BulletFired(pos) => {
                                 let i = state.rng.rand_uint(0, assets.shots.len() as u64) as usize;
                                 state.play_sound_at(&mut assets.shots[i], pos);
+                            }
+
+                            ra::Event::PlayerJoined(id) => {
+                                if id == state.player_id {
+                                    continue;
+                                }
+
+                                let name = &state.game_state.players[&id].name;
+                                state
+                                    .messages
+                                    .push_front((format!("{} has joined the game", name), Instant::now()));
+                            }
+
+                            ra::Event::PlayerLeft(name) => {
+                                state
+                                    .messages
+                                    .push_front((format!("{} left the game", name), Instant::now()));
                             }
                         }
                     }
@@ -405,7 +431,7 @@ fn step(e: Input,
                 }
                 Input::Press(button) => {
                     if !state.buttons_down.contains_key(&button) {
-                        state.buttons_down.insert(button, time::Instant::now());
+                        state.buttons_down.insert(button, Instant::now());
 
                         if let Some(button) = convert_button(button) {
                             let msg =
@@ -479,7 +505,7 @@ enum Stage {
 }
 
 struct Menu {
-    buttons_down: HashMap<Button, time::Instant>,
+    buttons_down: HashMap<Button, Instant>,
     mouse_screen: Vector,
 }
 
@@ -492,13 +518,14 @@ struct State {
     player_id: ra::PlayerId,
     window_size: (u32, u32),
     mouse_screen: Vector,
-    buttons_down: HashMap<Button, time::Instant>,
+    buttons_down: HashMap<Button, Instant>,
     particles: Vec<Particle>,
     player_dir: Vector,
-    last_tick: time::Instant,
+    last_tick: Instant,
     rng: Rng,
-    begin_time: time::Instant,
-    flash: time::Instant,
+    begin_time: Instant,
+    flash: Instant,
+    messages: VecDeque<(String, Instant)>,
 }
 
 impl State {
@@ -550,7 +577,6 @@ impl State {
                 pos,
                 dir,
                 health,
-                respawn_timer,
                 ref name,
                 ..
             } in self.game_state.players.values() {
@@ -588,8 +614,7 @@ impl State {
                          .zoom(1.0 / 300.0),
                      ctx.g);
             } else if health == 0.0 {
-                self.flash = time::Instant::now(); // -
-                // time::Duration::from_millis((respawn_timer * 1000.0) as u64);
+                self.flash = Instant::now();
             }
         }
 
@@ -619,6 +644,46 @@ impl State {
             let r = rectangle::rectangle_by_corners(0.0, 0.0, w as f64, h as f64);
             rectangle([color, 0.0, 0.0, 0.2], r, ctx.transforms.original, ctx.g);
         }
+
+        let (w, h) = self.window_size;
+        let w = w as f64;
+        let h = h as f64;
+        let duration = 4.0;
+
+        for (i, &(ref msg, s)) in self.messages.iter().enumerate() {
+            let time = s.elapsed().into_secs().min(duration) / duration;
+            let c = ez::expo_in(time);
+            let size = 20;
+            let xo = 10.0;
+            let yo = 10.0;
+            let rw = ctx.assets.cache.width(size, msg);
+            let rh = 30.0;
+            let r = [0.0, -rh * 0.75, rw, rh];
+            let t = ctx.transforms
+                .original
+                .trans(xo, h - yo - rh - i as f64 * rh);
+            rectangle([1.0, 1.0, 1.0, 0.1 * (1.0 - c)], r, t, ctx.g);
+            text([0.0, 0.0, 0.0, 1.0 - c], size, msg, &mut ctx.assets.cache, t, ctx.g);
+        }
+        
+        self.messages.retain(|&(_, i)| i.elapsed().into_secs() < duration);
+
+        let health = self.game_state.players[&self.player_id].health / PLAYER_HEALTH;
+        let rw = 300.0;
+        let rh = 30.0;
+        let yo = 10.0;
+        let m = 2.0;
+
+        let r = [w / 2.0 - rw / 2.0, h - rh - yo, rw, rh];
+
+        let h = [r[0] + m,
+                 r[1] + m,
+                 r[2] - m - m - ((1.0 - health as f64) * (rw - m - m)),
+                 r[3] - m - m];
+
+        rectangle(color::grey(0.6), r, ctx.transforms.original, ctx.g);
+        let c = health * 0.8 + 0.1;
+        rectangle([0.9, c, c, 1.0], h, ctx.transforms.original, ctx.g);
     }
 }
 
@@ -708,8 +773,4 @@ fn f(x: f32) -> f64 {
 
 fn as_f64s(v: Vector) -> (f64, f64) {
     (f(v.x), f(v.y))
-}
-
-fn as_line(v1: Vector, v2: Vector) -> [f64; 4] {
-    [f(v1.x), f(v1.y), f(v2.x), f(v2.y)]
 }
