@@ -18,9 +18,7 @@ matrix:
   include:
     # Linux
     - env: TARGET=i686-unknown-linux-gnu
-    - env: TARGET=i686-unknown-linux-musl
     - env: TARGET=x86_64-unknown-linux-gnu
-    - env: TARGET=x86_64-unknown-linux-musl
 
     # OSX
     - env: TARGET=i686-apple-darwin
@@ -28,18 +26,10 @@ matrix:
     - env: TARGET=x86_64-apple-darwin
       os: osx
 
-before_install: 
-  - set -e
-  - |
-    [ $TRAVIS_OS_NAME = linux ] || brew install openal-soft libsndfile
-  - sudo apt-get install -y libopenal-data libopenal1 libsndfile1
-addons:
-  apt:
-    packages:
-    - libopenal-dev
-    - libsndfile1-dev
+before_install: set -e
 
 install:
+  - if [ $TRAVIS_OS_NAME = linux ]; then sudo apt-get install libopenal-dev libsndfile1-dev; else brew install openal-soft libsndfile; fi
   - sh ci/install.sh
   - source ~/.cargo/env || true
 
