@@ -80,12 +80,11 @@ struct Opt {
 
 fn main() {
     let Opt {
-        username: name,
-        server_ip: ip,
+        username,
+        server_ip,
     } = Opt::from_args();
 
-    println!("Init ears: {}", ears::init());
-    let mut stream = connect(ip);
+    let mut stream = connect(server_ip);
     let opengl = OpenGL::V3_2;
     let (full_width, full_height) = glutin::get_primary_monitor().get_dimensions();
 
@@ -95,57 +94,29 @@ fn main() {
         .build()
         .unwrap();
 
-    fn load(image: &[u8]) -> Texture {
+    fn load_image(image: &[u8]) -> Texture {
         let dyn = image::load_from_memory_with_format(image, image::ImageFormat::PNG).unwrap();
         Texture::from_image(&dyn.to_rgba(), &TextureSettings::new())
     }
 
-    let glow = load(GLOW);
-    let blur = load(BLUR);
-    let puff = load(PUFF);
-    let sprite = load(SPRITE);
-
-    let mut shots = vec![];
-    for shot in SHOTS {
+    fn load_sound(data: &[u8], max_vol: f32) -> ears::Sound {
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        io::BufWriter::new(&mut file).write_all(shot).unwrap();
+        io::BufWriter::new(&mut file).write_all(data).unwrap();
         let mut sound = ears::Sound::new(file.path().to_str().unwrap()).unwrap();
-        sound.set_max_volume(0.2);
-        shots.push(sound);
+        sound.set_max_volume(max_vol);
+        sound
     }
 
-    let mut hurts = vec![];
-    for shot in HURTS {
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        io::BufWriter::new(&mut file).write_all(shot).unwrap();
-        let mut sound = ears::Sound::new(file.path().to_str().unwrap()).unwrap();
-        sound.set_max_volume(0.4);
-        hurts.push(sound);
-    }
+    let glow = load_image(GLOW);
+    let blur = load_image(BLUR);
+    let puff = load_image(PUFF);
+    let sprite = load_image(SPRITE);
 
-    let death = {
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        io::BufWriter::new(&mut file).write_all(DEATH).unwrap();
-        let mut sound = ears::Sound::new(file.path().to_str().unwrap()).unwrap();
-        sound.set_max_volume(0.3);
-        sound
-    };
-
-    let splat = {
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        io::BufWriter::new(&mut file).write_all(SPLAT).unwrap();
-        let mut sound = ears::Sound::new(file.path().to_str().unwrap()).unwrap();
-        sound.set_max_volume(0.6);
-        sound
-    };
-
-    let hitmarker = {
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        io::BufWriter::new(&mut file).write_all(HIT).unwrap();
-        let mut sound = ears::Sound::new(file.path().to_str().unwrap()).unwrap();
-        sound.set_max_volume(0.6);
-        sound
-    };
+    let shots = SHOTS.into_iter().map(|s| load_sound(s, 0.2)).collect();
+    let hurts = HURTS.into_iter().map(|s| load_sound(s, 0.4)).collect();
+    let death = load_sound(DEATH, 0.3);    
+    let splat = load_sound(SPLAT, 0.6);
+    let hitmarker = load_sound(HIT, 0.6);
 
     let cache = GlyphCache::from_bytes(FONT).unwrap();
     let mut gl = GlGraphics::new(opengl);
@@ -173,7 +144,7 @@ fn main() {
 
     println!("Got player_id from server: {}", player_id.0);
 
-    let msg = ra::ToServerMsg::Login(player_id, name.clone());
+    let msg = ra::ToServerMsg::Login(player_id, username.clone());
     bc::serialize_into(&mut stream, &msg, bc::Infinite).unwrap();
 
     println!("Sent login request");
@@ -225,7 +196,7 @@ fn main() {
     let player = ra::Player {
         health: PLAYER_HEALTH,
         id: player_id,
-        name,
+        name: username,
         dir: VEC_RIGHT,
         pos: Vector::new(1.5, 1.5),
         vel: VEC_ZERO,
@@ -276,7 +247,7 @@ fn step(e: Input,
                 Input::Render(a) => {
                     gl.draw(a.viewport(), |c, g| {
                         clear(WHITE, g);
-
+                        // Reset on respawn?
                         let elapsed = state.begin_time.elapsed().into_secs().min(1.0);
                         let original = c.transform;
                         let centered = original
