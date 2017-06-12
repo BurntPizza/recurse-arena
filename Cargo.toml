@@ -2,7 +2,7 @@
 authors = ["BurntPizza <xburntpizza@gmail.com>"]
 name = "recurse_arena"
 version = "0.1.0"
-description = "A little game for the RC Sprummer™ 2017 Game Jam"
+description = "A little game for the RC Sprummer™ 2017 Game Jam. Music by Kevin MacLeod (incompetech.com)."
 
 [[bin]]
 name = "recurse_arena"

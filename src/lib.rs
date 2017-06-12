@@ -34,6 +34,7 @@ pub const BULLET_RADIUS: f32 = 0.05;
 
 pub const PLAYER_HEALTH: f32 = 100.0;
 pub const MAX_DAMAGE: f32 = 10.0;
+pub const RESPAWN_TIME: f32 = 2.0;
 
 #[derive(Copy, Clone)]
 pub struct CSquare {
@@ -127,6 +128,7 @@ impl GameState {
     // returns players to respawn
     pub fn update(&mut self, collision_boxes: &[CSquare], dt: f32) -> Vec<PlayerId> {
         let mut needs_respawn = vec![];
+        let mut scored = vec![];
         self.events.clear();
 
         // 'players: for i in 0..self.players.len() {
@@ -159,8 +161,8 @@ impl GameState {
                     self.events.push(Event::BulletHitPlayer(b, p.id, f));
 
                     if p.health == 0.0 {
-                        p.respawn_timer = 2.0;
-                        
+                        p.respawn_timer = RESPAWN_TIME;
+                        scored.push(b.pid);
                         self.events.push(Event::PlayerDied(p.id, b.pid));
                         continue 'players;
                     }
@@ -185,6 +187,11 @@ impl GameState {
 
             p.vel = p.vel.magnitude().min(40.0) * p.vel.normalize() * 0.9;
             p.pos += p.vel * dt;
+        }
+
+        for id in scored {
+            let p = self.players.get_mut(&id).unwrap();
+            p.score += 1;
         }
 
         for i in (0..self.bullets.len()).rev() {
@@ -256,6 +263,7 @@ pub struct Player {
     pub id: PlayerId,
     pub health: f32,
     pub respawn_timer: f32,
+    pub score: u32,
 }
 
 pub fn calc_damage(bullet: &Bullet, player: &Player) -> f32 {

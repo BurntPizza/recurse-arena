@@ -68,6 +68,9 @@ static DEATH: &[u8] = include_bytes!("../assets/sfx_sound_shutdown1.ogg");
 static SPLAT: &[u8] = include_bytes!("../assets/Splat.ogg");
 static HIT: &[u8] = include_bytes!("../assets/Hitmarker.ogg");
 
+static MUSIC: &[u8] = include_bytes!("../assets/Cut and Run.ogg");
+
+
 #[derive(StructOpt)]
 #[structopt(name = "Recurse Arena")]
 struct Opt {
@@ -114,9 +117,18 @@ fn main() {
 
     let shots = SHOTS.into_iter().map(|s| load_sound(s, 0.2)).collect();
     let hurts = HURTS.into_iter().map(|s| load_sound(s, 0.4)).collect();
-    let death = load_sound(DEATH, 0.3);    
+    let death = load_sound(DEATH, 0.5);
     let splat = load_sound(SPLAT, 0.6);
     let hitmarker = load_sound(HIT, 0.6);
+
+    let mut music = {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        io::BufWriter::new(&mut file).write_all(MUSIC).unwrap();
+        let mut music = ears::Music::new(file.path().to_str().unwrap()).unwrap();
+        music.set_looping(true);
+        music.set_volume(0.5);
+        music
+    };
 
     let cache = GlyphCache::from_bytes(FONT).unwrap();
     let mut gl = GlGraphics::new(opengl);
@@ -202,11 +214,13 @@ fn main() {
         vel: VEC_ZERO,
         force: VEC_ZERO,
         respawn_timer: 0.0,
+        score: 0,
     };
 
     state.game_state.players.insert(player_id, player);
 
     let mut stage = Stage::Playing(state);
+    music.play();
 
     while let Some(e) = events.next(&mut window) {
         stage = step(e,
@@ -335,7 +349,13 @@ fn step(e: Input,
                                 state.messages.push_front((msgs[i].clone(), Instant::now()));
                             }
 
-                            ra::Event::PlayerRespawned(_id) => {}
+                            ra::Event::PlayerRespawned(id) => {
+                                if state.player_id == id {
+                                    let t = state.game_state.players[&id].respawn_timer;
+                                    state.begin_time = Instant::now() -
+                                                       Duration::from_millis((t * 1000.0) as u64);
+                                }
+                            }
 
                             ra::Event::BulletFired(pos) => {
                                 let i = state.rng.rand_uint(0, assets.shots.len() as u64) as usize;
@@ -591,11 +611,11 @@ impl State {
         let w = w as f64;
         let h = h as f64;
         let duration = 4.0;
+        let size = 20;
 
         for (i, &(ref msg, s)) in self.messages.iter().enumerate() {
             let time = s.elapsed().into_secs().min(duration) / duration;
             let c = ez::expo_in(time);
-            let size = 20;
             let xo = 10.0;
             let yo = 10.0;
             let rw = ctx.assets.cache.width(size, msg);
@@ -608,6 +628,33 @@ impl State {
             text([0.0, 0.0, 0.0, 1.0 - c],
                  size,
                  msg,
+                 &mut ctx.assets.cache,
+                 t,
+                 ctx.g);
+        }
+
+        let mut scores = vec![];
+
+        for p in self.game_state.players.values() {
+            scores.push((&p.name, p.score));
+        }
+
+        scores.sort_by(|&(n1, s1), &(n2, s2)| s2.cmp(&s1).then(n1.cmp(n2)));
+
+        for (i, (name, score)) in scores.into_iter().enumerate().take(10) {
+            let msg = format!("{} | {}", name, score);
+            let xo = 10.0;
+            let yo = 10.0;
+            let rw = ctx.assets.cache.width(size, &msg);
+            let rh = 30.0;
+            let r = [0.0, -rh * 0.75, rw, rh];
+            let t = ctx.transforms
+                .original
+                .trans(w - xo - rw, yo + rh + i as f64 * rh);
+            rectangle([1.0, 1.0, 1.0, 0.1], r, t, ctx.g);
+            text([0.0, 0.0, 0.0, 1.0],
+                 size,
+                 &msg,
                  &mut ctx.assets.cache,
                  t,
                  ctx.g);

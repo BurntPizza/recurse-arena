@@ -165,6 +165,7 @@ fn main() {
                     force: VEC_ZERO,
                     vel: VEC_ZERO,
                     respawn_timer: 0.0,
+                    score: 0,
                 };
 
                 game_state.events.push(Event::PlayerJoined(player_id));
