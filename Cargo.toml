@@ -4,13 +4,23 @@ name = "recurse_arena"
 version = "0.1.0"
 description = "A little game for the RC Sprummer™ 2017 Game Jam. Music by Kevin MacLeod (incompetech.com)."
 
+[profile.release]
+opt-level = 3
+debug = false
+rpath = false
+lto = true
+debug-assertions = false
+panic = 'unwind'
+
 [[bin]]
 name = "recurse_arena"
 path = "src/client.rs"
+crate-type = ["staticlib"]
 
 [[bin]]
 name = "recurse_arena_server"
 path = "src/server.rs"
+crate-type = ["staticlib"]
 
 [dependencies]
 bincode = "0.8.0"
