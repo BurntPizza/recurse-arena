@@ -32,7 +32,7 @@ before_install:
   - set -e
   - |
     [ $TRAVIS_OS_NAME = linux ] || brew install openal-soft libsndfile
-  - sudo apt-get install -y libopenal-data libopenal1 libsndfile1 openal sndfile
+  - sudo apt-get install -y libopenal-data libopenal1 libsndfile1
 addons:
   apt:
     packages:
