@@ -29,9 +29,15 @@ matrix:
 before_install: set -e
 
 install:
-  - if [ $TRAVIS_OS_NAME = linux ]; then sudo apt-get install libopenal-dev libsndfile1-dev; else brew install openal-soft libsndfile; fi
+  - if [ $TRAVIS_OS_NAME = linux ]; then sudo apt install libopenal-dev libopenal1 libsndfile1-dev libsndfile1; else brew install openal-soft libsndfile; fi
   - sh ci/install.sh
   - source ~/.cargo/env || true
+
+addons:
+  apt:
+    packages:
+    - libopenal-dev
+    - libsndfile1-dev
 
 script:
   - bash ci/script.sh
