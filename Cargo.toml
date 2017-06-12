@@ -2,24 +2,23 @@
 authors = ["BurntPizza <xburntpizza@gmail.com>"]
 name = "recurse_arena"
 version = "0.1.0"
+description = "A little game for the RC Sprummer™ 2017 Game Jam"
 
 [[bin]]
-name = "RecurseArena"
+name = "recurse_arena"
 path = "src/client.rs"
 
 [[bin]]
-name = "RecurseArena_server"
+name = "recurse_arena_server"
 path = "src/server.rs"
 
 [dependencies]
 bincode = "0.8.0"
 ears = "0.4.0"
 ezing = "0.1.2"
-find_folder = "0.3.0"
 glutin = "0.8.1"
 hsl = "0.1.1"
 image = "0.13.0"
-lazy_static = "0.2.8"
 ludomath = "1.1.1"
 piston = "0.32.0"
 piston2d-graphics = "0.21.1"
@@ -27,6 +26,8 @@ piston2d-opengl_graphics = "0.43.1"
 pistoncore-glutin_window = "0.37.0"
 serde = "1.0.8"
 serde_derive = "1.0.8"
+structopt = "0.0.3"
+structopt-derive = "0.0.3"
 tempfile = "2.1.5"
 
 [lib]

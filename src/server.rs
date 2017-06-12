@@ -1,8 +1,10 @@
-#![allow(non_snake_case)]
 
 extern crate recurse_arena;
 extern crate bincode as bc;
 extern crate ludomath;
+extern crate structopt;
+#[macro_use]
+extern crate structopt_derive;
 
 use recurse_arena::*;
 
@@ -17,10 +19,23 @@ use std::time::{Instant, Duration};
 use ludomath::rng::Rng;
 use ludomath::vec2d::*;
 use ludomath::consts::*;
+use structopt::StructOpt;
+
+#[derive(StructOpt)]
+#[structopt(name = "Recurse Arena Server")]
+struct Opt {
+    #[structopt(help = "Port to listen on", default_value = "8000")]
+    port: String,
+}
+
 
 fn main() {
-    let port = 8000;
-    let socket = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap();
+    let Opt { port } = Opt::from_args();
+
+    let addr = format!("0.0.0.0:{}", port);
+
+    println!("Binding to {}...", addr);
+    let socket = TcpListener::bind(addr).unwrap();
 
     println!("Listening on port {}", port);
 
@@ -151,7 +166,7 @@ fn main() {
                     vel: VEC_ZERO,
                     respawn_timer: 0.0,
                 };
-                
+
                 game_state.events.push(Event::PlayerJoined(player_id));
                 game_state.players.insert(player_id, player);
             }
@@ -184,9 +199,9 @@ fn main() {
             }
         }
 
-        
 
-        
+
+
 
         let delta = start.elapsed();
         desired_delta.checked_sub(delta).map(|d| thread::sleep(d));
@@ -274,13 +289,15 @@ fn pump_client(mut client: Client, sender: Sender<(Input, PlayerId)>) {
                 match msg {
                     ToServerMsg::Input(pid, input) => {
                         assert_eq!(pid, client.player_id);
-                        sender.send((input, pid)).unwrap();
+                        if let Err(e) = sender.send((input, pid)) {
+                            println!("Pump thread for client {}: Error: {}", pid.0, e);
+                        }
                     }
                     _ => panic!(),
                 }
             }
             Err(e) => {
-                println!("Pump thread for client {}: ERROR: {}",
+                println!("Pump thread for client {}: Error: {}",
                          client.player_id.0,
                          e);
                 break;

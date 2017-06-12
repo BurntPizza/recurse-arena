@@ -1,4 +1,3 @@
-#![allow(non_snake_case)]
 
 extern crate recurse_arena as ra;
 extern crate piston;
@@ -12,17 +11,21 @@ extern crate bincode as bc;
 extern crate image;
 extern crate tempfile;
 extern crate ears;
+extern crate structopt;
+#[macro_use]
+extern crate structopt_derive;
 
-use ra::{GameState, LOGO, LOGO_WIDTH, LOGO_HEIGHT, PLAYER_HEALTH, PLAYER_RADIUS, BULLET_RADIUS,
-         CSquare, IntoSecs};
+
+use ra::{GameState, LOGO, LOGO_WIDTH, LOGO_HEIGHT, PLAYER_HEALTH, PLAYER_RADIUS, IntoSecs};
 
 use std::io;
 use std::time::{Instant, Duration};
 use std::thread;
+use std::process;
 use std::io::prelude::*;
 use std::net::TcpStream;
 use std::collections::{HashMap, VecDeque};
-use std::sync::mpsc::{channel, Sender, Receiver};
+use std::sync::mpsc::{channel, Receiver};
 
 use piston::window::*;
 use piston::event_loop::*;
@@ -38,14 +41,11 @@ use ludomath::vec2d::*;
 use ludomath::consts::*;
 use ludomath::rng::Rng;
 use ears::AudioController;
-
-
-const ADDR: &str = "localhost:8000";
+use structopt::StructOpt;
 
 const BLACK: Color = [0.0, 0.0, 0.0, 1.0];
 const GREEN: Color = [0.0, 0.9, 0.0, 1.0];
 const WHITE: Color = [1.0; 4];
-const RED: Color = [1.0, 0.0, 0.0, 1.0];
 
 static FONT: &[u8] = include_bytes!("../assets/Charybdis.ttf");
 
@@ -68,10 +68,24 @@ static DEATH: &[u8] = include_bytes!("../assets/sfx_sound_shutdown1.ogg");
 static SPLAT: &[u8] = include_bytes!("../assets/Splat.ogg");
 static HIT: &[u8] = include_bytes!("../assets/Hitmarker.ogg");
 
+#[derive(StructOpt)]
+#[structopt(name = "Recurse Arena")]
+struct Opt {
+    #[structopt(help = "Player name")]
+    username: String,
+    #[structopt(help = "IP address of the server to connect to")]
+    server_ip: String,
+}
+
 
 fn main() {
+    let Opt {
+        username: name,
+        server_ip: ip,
+    } = Opt::from_args();
+
     println!("Init ears: {}", ears::init());
-    let mut stream = connect();
+    let mut stream = connect(ip);
     let opengl = OpenGL::V3_2;
     let (full_width, full_height) = glutin::get_primary_monitor().get_dimensions();
 
@@ -138,13 +152,6 @@ fn main() {
     let mut events = Events::new(EventSettings::new());
     let (sender, reciever) = channel();
 
-    let menu = Menu {
-        buttons_down: HashMap::new(),
-        mouse_screen: Vector::default(),
-    };
-
-    let mut stage = Stage::Menu(menu);
-
     let mut assets = Assets {
         cache,
         glow,
@@ -158,6 +165,78 @@ fn main() {
         hitmarker,
     };
 
+    println!("Attempting to receive player_id from server...");
+    let player_id = match bc::deserialize_from(&mut stream, bc::Infinite).unwrap() {
+        ra::FromServerMsg::Welcome(id) => id,
+        _ => unreachable!(),
+    };
+
+    println!("Got player_id from server: {}", player_id.0);
+
+    let msg = ra::ToServerMsg::Login(player_id, name.clone());
+    bc::serialize_into(&mut stream, &msg, bc::Infinite).unwrap();
+
+    println!("Sent login request");
+
+    println!("Spawning listener thread...");
+    let mut stream_clone = stream.try_clone().unwrap();
+
+    thread::spawn(move || {
+        loop {
+            // try to read new state from server
+            match bc::deserialize_from(&mut stream_clone, bc::Infinite) {
+                Ok(msg) => {
+                    match msg {
+                        ra::FromServerMsg::Update(gs) => {
+                            if sender.send(gs).is_err() {
+                                break;
+                            }
+                        }
+                        _ => panic!("Protocol error / unimplemented"),
+                    }
+                }
+                Err(e) => {
+                    println!("Listener thread: Error: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+
+    let mut state = State {
+        game_state: GameState {
+            players: HashMap::new(),
+            bullets: vec![],
+            events: vec![],
+        },
+        player_id,
+        window_size: (0, 0),
+        mouse_screen: Vector::default(),
+        buttons_down: HashMap::new(),
+        particles: vec![],
+        player_dir: Vector::default(),
+        last_tick: Instant::now(),
+        rng: Rng::new(),
+        begin_time: Instant::now(),
+        flash: Instant::now() - Duration::from_secs(10),
+        messages: VecDeque::new(),
+    };
+
+    let player = ra::Player {
+        health: PLAYER_HEALTH,
+        id: player_id,
+        name,
+        dir: VEC_RIGHT,
+        pos: Vector::new(1.5, 1.5),
+        vel: VEC_ZERO,
+        force: VEC_ZERO,
+        respawn_timer: 0.0,
+    };
+
+    state.game_state.players.insert(player_id, player);
+
+    let mut stage = Stage::Playing(state);
+
     while let Some(e) = events.next(&mut window) {
         stage = step(e,
                      stage,
@@ -165,7 +244,6 @@ fn main() {
                      &mut assets,
                      &mut window,
                      &mut stream,
-                     &sender,
                      &reciever);
     }
 }
@@ -189,114 +267,9 @@ fn step(e: Input,
         assets: &mut Assets,
         window: &mut GlutinWindow,
         mut stream: &mut TcpStream,
-        sender: &Sender<GameState>,
         reciever: &Receiver<GameState>)
         -> Stage {
     match stage {
-        Stage::Menu(mut menu) => {
-            // menu screen game loop
-            match e {
-                Input::Render(a) => {
-                    gl.draw(a.viewport(), |_c, g| { clear(WHITE, g); });
-                }
-                Input::Update(_) => {
-                    if true |
-                       menu.buttons_down
-                           .contains_key(&Button::Keyboard(Key::Space)) {
-                        // begin game
-
-                        let player_name = "Josh".to_owned();
-
-                        println!("Attempting to receive player_id from server...");
-                        let player_id = match bc::deserialize_from(&mut stream, bc::Infinite)
-                                  .unwrap() {
-                            ra::FromServerMsg::Welcome(id) => id,
-                            _ => unreachable!(),
-                        };
-
-                        println!("Got player_id from server: {}", player_id.0);
-
-                        let msg = ra::ToServerMsg::Login(player_id, player_name.clone());
-                        bc::serialize_into(&mut stream, &msg, bc::Infinite).unwrap();
-
-                        println!("Sent login request");
-
-                        println!("Spawning listener thread...");
-                        let sender = sender.clone();
-                        let mut stream_clone = stream.try_clone().unwrap();
-
-                        thread::spawn(move || {
-                            loop {
-                                // try to read new state from server
-                                match bc::deserialize_from(&mut stream_clone, bc::Infinite) {
-                                    Ok(msg) => {
-                                        match msg {
-                                            ra::FromServerMsg::Update(gs) => {
-                                                sender.send(gs).unwrap()
-                                            }
-                                            _ => panic!("Protocol error / unimplemented"),
-                                        }
-                                    }
-                                    Err(e) => {
-                                        println!("Listener thread: Error: {}", e);
-                                        break;
-                                    }
-                                }
-                            }
-                            println!("Lister thread: Stopping...");
-                        });
-
-                        let mut state = State {
-                            game_state: GameState {
-                                players: HashMap::new(),
-                                bullets: vec![],
-                                events: vec![],
-                            },
-                            player_id,
-                            window_size: (0, 0),
-                            mouse_screen: Vector::default(),
-                            buttons_down: HashMap::new(),
-                            particles: vec![],
-                            player_dir: Vector::default(),
-                            last_tick: Instant::now(),
-                            rng: Rng::new(),
-                            begin_time: Instant::now(),
-                            flash: Instant::now() - Duration::from_secs(10),
-                            messages: VecDeque::new(),
-                        };
-
-                        let player = ra::Player {
-                            health: PLAYER_HEALTH,
-                            id: player_id,
-                            name: player_name,
-                            dir: VEC_RIGHT,
-                            pos: Vector::new(1.5, 1.5),
-                            vel: VEC_ZERO,
-                            force: VEC_ZERO,
-                            respawn_timer: 0.0,
-                        };
-
-                        state.game_state.players.insert(player_id, player);
-
-                        return Stage::Playing(state);
-                    }
-                }
-                Input::Press(button) => {
-                    if !menu.buttons_down.contains_key(&button) {
-                        menu.buttons_down.insert(button, Instant::now());
-                    }
-                }
-                Input::Release(button) => {
-                    menu.buttons_down.remove(&button);
-                }
-                Input::Move(Motion::MouseCursor(x, y)) => {
-                    menu.mouse_screen = Vector::new(x as f32, y as f32);
-                }
-                _ => {}
-            }
-
-            Stage::Menu(menu)
-        }
         Stage::Playing(mut state) => {
             // main game loop
             match e {
@@ -311,14 +284,8 @@ fn step(e: Input,
                             .zoom(ez::expo_in(elapsed) as f64 * 300.0);
 
                         let (px, py) = as_f64s(state.player_pos());
-
                         let tracking = centered.trans(-px, -py);
-
-                        let transforms = Transforms {
-                            original,
-                            centered,
-                            tracking,
-                        };
+                        let transforms = Transforms { original, tracking };
 
                         let mut ctx = RenderContext {
                             transforms: &transforms,
@@ -397,7 +364,7 @@ fn step(e: Input,
                                 state.messages.push_front((msgs[i].clone(), Instant::now()));
                             }
 
-                            ra::Event::PlayerRespawned(id) => {}
+                            ra::Event::PlayerRespawned(_id) => {}
 
                             ra::Event::BulletFired(pos) => {
                                 let i = state.rng.rand_uint(0, assets.shots.len() as u64) as usize;
@@ -412,13 +379,15 @@ fn step(e: Input,
                                 let name = &state.game_state.players[&id].name;
                                 state
                                     .messages
-                                    .push_front((format!("{} has joined the game", name), Instant::now()));
+                                    .push_front((format!("{} has joined the game", name),
+                                                 Instant::now()));
                             }
 
                             ra::Event::PlayerLeft(name) => {
                                 state
                                     .messages
-                                    .push_front((format!("{} left the game", name), Instant::now()));
+                                    .push_front((format!("{} left the game", name),
+                                                 Instant::now()));
                             }
                         }
                     }
@@ -500,17 +469,19 @@ fn convert_button(b: Button) -> Option<ra::Button> {
 }
 
 enum Stage {
-    Menu(Menu),
     Playing(State),
 }
 
-struct Menu {
-    buttons_down: HashMap<Button, Instant>,
-    mouse_screen: Vector,
-}
+fn connect(ip: String) -> TcpStream {
+    println!("Connecting to {}...", ip);
 
-fn connect() -> TcpStream {
-    TcpStream::connect(ADDR).unwrap_or_else(|e| panic!("Failed to connect: {}", e))
+    match TcpStream::connect(ip) {
+        Ok(stream) => stream,
+        Err(e) => {
+            println!("Failed to connect: {}", e);
+            process::exit(-1);
+        }
+    }
 }
 
 struct State {
@@ -663,10 +634,16 @@ impl State {
                 .original
                 .trans(xo, h - yo - rh - i as f64 * rh);
             rectangle([1.0, 1.0, 1.0, 0.1 * (1.0 - c)], r, t, ctx.g);
-            text([0.0, 0.0, 0.0, 1.0 - c], size, msg, &mut ctx.assets.cache, t, ctx.g);
+            text([0.0, 0.0, 0.0, 1.0 - c],
+                 size,
+                 msg,
+                 &mut ctx.assets.cache,
+                 t,
+                 ctx.g);
         }
-        
-        self.messages.retain(|&(_, i)| i.elapsed().into_secs() < duration);
+
+        self.messages
+            .retain(|&(_, i)| i.elapsed().into_secs() < duration);
 
         let health = self.game_state.players[&self.player_id].health / PLAYER_HEALTH;
         let rw = 300.0;
@@ -740,7 +717,6 @@ struct Spark {
 
 struct Transforms {
     original: Matrix2d,
-    centered: Matrix2d,
     tracking: Matrix2d,
 }
 

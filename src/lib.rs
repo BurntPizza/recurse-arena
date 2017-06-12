@@ -8,7 +8,6 @@ extern crate ludomath;
 use std::time::Duration;
 use std::collections::HashMap;
 
-use ludomath::consts::*;
 use ludomath::vec2d::*;
 
 pub const LOGO: &[&str] = &["bbbbbbbbbbbb",
